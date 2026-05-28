@@ -247,11 +247,13 @@ function renderFilters() {
     all: State.books.length,
     read: State.books.filter(b => b.status === 'read').length,
     tbr: State.books.filter(b => b.status === 'tbr').length,
+    dnf: State.books.filter(b => b.status === 'dnf').length,
     bookmarked: State.books.filter(b => b.bookmarked).length,
   };
-  $('#filtersRow').innerHTML = ['all','read','tbr','bookmarked'].map(f => `
+  const labels = { all: 'All', read: 'Read', tbr: 'TBR', dnf: 'DNF', bookmarked: 'Bookmarked' };
+  $('#filtersRow').innerHTML = ['all','read','tbr','dnf','bookmarked'].map(f => `
     <button class="pill ${State.filter===f?'on':''}" data-f="${f}">
-      ${f === 'all' ? 'All' : f === 'read' ? 'Read' : f === 'tbr' ? 'TBR' : 'Bookmarked'}
+      ${labels[f]}
       <span style="opacity:0.55"> ${counts[f]}</span>
     </button>`).join('');
   $$('#filtersRow .pill').forEach(p => p.onclick = () => {
@@ -360,13 +362,15 @@ function renderDirtyNote() {
 }
 
 function bookCard(b) {
+  const showCorner = b.bookmarked || (b.status === 'read' && b.rating) || b.status === 'dnf';
   return `
     <div class="book-card" onclick="location.hash='#/book/${attr(b.id)}'">
       ${coverHtml(b)}
-      ${b.bookmarked || (b.status === 'read' && b.rating)
+      ${showCorner
         ? `<span class="corner">
             ${b.bookmarked ? '★' : ''}
             ${b.status === 'read' && b.rating ? renderRating(b.rating) : ''}
+            ${b.status === 'dnf' ? 'DNF' : ''}
           </span>`
         : ''}
       <div class="title">${esc(b.title || '(untitled)')}</div>
@@ -389,7 +393,9 @@ function bookRow(b) {
       </div>
       <div class="right">
         ${b.bookmarked ? `<span class="bookmark-on" title="Bookmarked">★</span>` : ''}
-        ${b.status === 'read' && b.rating ? renderRating(b.rating) : `<span class="badge">${b.status === 'tbr' ? 'TBR' : ''}</span>`}
+        ${b.status === 'read' && b.rating
+          ? renderRating(b.rating)
+          : `<span class="badge">${b.status === 'tbr' ? 'TBR' : b.status === 'dnf' ? 'DNF' : ''}</span>`}
       </div>
     </li>`;
 }
@@ -398,6 +404,7 @@ function applyFilter(books) {
   let out = books.slice();
   if (State.filter === 'read') out = out.filter(b => b.status === 'read');
   else if (State.filter === 'tbr') out = out.filter(b => b.status === 'tbr');
+  else if (State.filter === 'dnf') out = out.filter(b => b.status === 'dnf');
   else if (State.filter === 'bookmarked') out = out.filter(b => b.bookmarked);
   const q = State.search.trim().toLowerCase();
   if (q) {
@@ -460,6 +467,7 @@ function viewDetail(id) {
   if (b.genre) meta.push(['Genre', esc(b.genre)]);
   if (b.status === 'read' && b.rating) meta.push(['Rating', `${renderRating(b.rating, true)} <span style="color:var(--text-soft);margin-left:6px">${RATING_LABELS[b.rating]}</span>`]);
   if (b.status === 'tbr') meta.push(['Status', b.bookmarked ? 'TBR · bookmarked' : 'TBR']);
+  if (b.status === 'dnf') meta.push(['Status', 'Did not finish']);
 
   $('#app').innerHTML = `
     <div class="detail">
@@ -510,6 +518,7 @@ function viewEdit(id) {
           <div class="seg">
             <button type="button" data-status="tbr" class="${b.status==='tbr'?'on':''}">TBR</button>
             <button type="button" data-status="read" class="${b.status==='read'?'on':''}">Read</button>
+            <button type="button" data-status="dnf" class="${b.status==='dnf'?'on':''}">DNF</button>
           </div>
         </div>
         <div class="field">
@@ -706,6 +715,7 @@ function viewEdit(id) {
       medium,
       dateRead: status === 'read' ? (fd.get('dateRead') || null) : null,
       rating: status === 'read' ? (+window._getRating() || null) : null,
+      // DNF: no date read, no rating (per spec). Existing values cleared above.
       // bookmarked is preserved from existing book via Object.assign; toggled from detail header
       pageCount: +(fd.get('pageCount') || 0) || null,
       publicationDate: (fd.get('publicationDate') || null) || null,
@@ -1087,7 +1097,7 @@ function challengeCard(ch) {
               <li onclick="event.stopPropagation();location.hash='#/book/${attr(b.id)}'">
                 <span class="mark">${b.status==='read'?'✓':'·'}</span>
                 <span class="title">${esc(b.title)}</span>
-                <span class="ch-status-pill ${b.status==='read'?'read':''}">${b.status==='read'?'read':'tbr'}</span>
+                <span class="ch-status-pill ${b.status==='read'?'read':b.status==='dnf'?'dnf':''}">${b.status==='read'?'read':b.status==='dnf'?'dnf':'tbr'}</span>
               </li>`).join('')}
           </ul>`
         : `<div class="helper">No matching books in your library yet.</div>`;
