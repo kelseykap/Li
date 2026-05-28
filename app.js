@@ -35,13 +35,39 @@ const PAT_KEY = 'lib.pat.v1'; // separated so it can be wiped independently
 
 const State = {
   books: [],
+  challenges: [],
   filter: 'all', // all | read | tbr | bookmarked
   sort: 'recent',
+  sortDir: 'desc', // 'asc' | 'desc'
+  view: 'list', // 'list' | 'grid'
   search: '',
   loaded: false,
   dirty: false, // true if local changes not pushed to GitHub
   config: { owner: '', repo: '', branch: 'main', path: 'books.json' },
 };
+
+const DEFAULT_CHALLENGES = [
+  { id: 'ch_alphabet', type: 'alphabet', name: 'Read the alphabet', description: 'A book starting with each letter A–Z. Articles ("The", "A") stripped.' },
+  { id: 'ch_countries', type: 'country', name: 'One book per country', description: 'Unique countries discovered through reading.' },
+  { id: 'ch_atwood', type: 'author', name: 'Complete Margaret Atwood', target: 'Margaret Atwood', description: 'Every book by Margaret Atwood — read or TBR.' },
+  { id: 'ch_time', type: 'genre', name: 'Genre: Time-travel', target: 'Time-travel', description: 'Books exploring time travel.' },
+];
+
+// Persist UI preferences across sessions
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem('lib.prefs.v1') || '{}');
+    if (p.view) State.view = p.view;
+    if (p.sort) State.sort = p.sort;
+    if (p.sortDir) State.sortDir = p.sortDir;
+    if (p.filter) State.filter = p.filter;
+  } catch {}
+}
+function savePrefs() {
+  localStorage.setItem('lib.prefs.v1', JSON.stringify({
+    view: State.view, sort: State.sort, sortDir: State.sortDir, filter: State.filter,
+  }));
+}
 
 function loadConfig() {
   try { State.config = Object.assign(State.config, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch {}
@@ -53,13 +79,16 @@ function setPat(v) { v ? localStorage.setItem(PAT_KEY, v) : localStorage.removeI
 // ---------- storage ----------
 async function loadBooks() {
   loadConfig();
+  loadPrefs();
   // localStorage has working copy; books.json in repo is the source of truth on first load
   const local = localStorage.getItem(STORE_KEY);
   if (local) {
     try {
       const doc = JSON.parse(local);
       State.books = doc.books || [];
+      State.challenges = doc.challenges;
       State.dirty = !!doc.dirty;
+      seedDefaultsIfNeeded();
       State.loaded = true;
       return;
     } catch {}
@@ -70,18 +99,28 @@ async function loadBooks() {
     if (r.ok) {
       const doc = await r.json();
       State.books = doc.books || [];
+      State.challenges = doc.challenges;
       State.dirty = false;
+      seedDefaultsIfNeeded();
       persist();
       State.loaded = true;
       return;
     }
   } catch {}
   State.books = [];
+  State.challenges = DEFAULT_CHALLENGES.slice();
   State.loaded = true;
 }
 
+function seedDefaultsIfNeeded() {
+  if (State.challenges === undefined || State.challenges === null) {
+    State.challenges = DEFAULT_CHALLENGES.slice();
+    State.dirty = true;
+  }
+}
+
 function persist() {
-  const doc = { version: 1, updatedAt: nowIso(), dirty: State.dirty, books: State.books };
+  const doc = { version: 2, updatedAt: nowIso(), dirty: State.dirty, books: State.books, challenges: State.challenges };
   localStorage.setItem(STORE_KEY, JSON.stringify(doc));
 }
 
@@ -124,6 +163,9 @@ const routes = [
   { re: /^#\/book\/([^/]+)$/, view: (m) => viewDetail(m[1]) },
   { re: /^#\/add$/, view: () => viewEdit(null) },
   { re: /^#\/stats$/, view: viewStats },
+  { re: /^#\/challenges$/, view: viewChallenges },
+  { re: /^#\/challenge\/new$/, view: () => viewChallengeEdit(null) },
+  { re: /^#\/challenge\/([^/]+)\/edit$/, view: (m) => viewChallengeEdit(m[1]) },
   { re: /^#\/map$/, view: viewMap },
   { re: /^#\/settings$/, view: viewSettings },
 ];
@@ -154,7 +196,10 @@ function coverHtml(b, size = 'small') {
 }
 
 function viewLibrary() {
-  setHeader({ title: 'Library' });
+  setHeader({
+    title: 'Library',
+    right: `<a href="#/add" class="icon-btn" aria-label="Add book"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>`
+  });
   const app = $('#app');
   const filtered = applyFilter(State.books);
   const counts = {
@@ -163,6 +208,7 @@ function viewLibrary() {
     tbr: State.books.filter(b => b.status === 'tbr').length,
     bookmarked: State.books.filter(b => b.bookmarked).length,
   };
+  const isGrid = State.view === 'grid';
   app.innerHTML = `
     <div class="filters">
       ${['all','read','tbr','bookmarked'].map(f => `
@@ -178,19 +224,48 @@ function viewLibrary() {
           ['recent','Recent'],
           ['title','Title'],
           ['author','Author'],
-          ['rating','Rating ↓'],
-          ['date','Date read ↓'],
+          ['rating','Rating'],
+          ['date','Date read'],
         ].map(([v,l]) => `<option value="${v}" ${State.sort===v?'selected':''}>${l}</option>`).join('')}
       </select>
+      <button class="icon-btn" id="dirBtn" aria-label="Sort direction" title="${State.sortDir==='desc'?'Descending — tap for ascending':'Ascending — tap for descending'}">
+        ${State.sortDir==='desc'
+          ? '<svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg>'
+          : '<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>'}
+      </button>
+      <button class="icon-btn ${isGrid?'on':''}" id="viewBtn" aria-label="${isGrid?'List view':'Grid view'}" title="${isGrid?'List view':'Grid view'}">
+        ${isGrid
+          ? '<svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>'
+          : '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>'}
+      </button>
     </div>
     ${filtered.length === 0
       ? `<div class="empty">${State.search ? 'No matches.' : 'No books yet. Tap + to add one.'}</div>`
-      : `<ul class="book-list">${filtered.map(bookRow).join('')}</ul>`}
+      : isGrid
+        ? `<div class="book-grid">${filtered.map(bookCard).join('')}</div>`
+        : `<ul class="book-list">${filtered.map(bookRow).join('')}</ul>`}
     ${State.dirty ? `<div class="empty" style="font-size:12px;padding:24px 0 0">Unsaved changes · <a href="#/settings" style="text-decoration:underline">sync to GitHub</a></div>` : ''}
   `;
-  $$('.pill').forEach(p => p.onclick = () => { State.filter = p.dataset.f; viewLibrary(); });
+  $$('.pill').forEach(p => p.onclick = () => { State.filter = p.dataset.f; savePrefs(); viewLibrary(); });
   $('#search').oninput = debounce(e => { State.search = e.target.value; viewLibrary(); }, 150);
-  $('#sort').onchange = e => { State.sort = e.target.value; viewLibrary(); };
+  $('#sort').onchange = e => { State.sort = e.target.value; savePrefs(); viewLibrary(); };
+  $('#dirBtn').onclick = () => { State.sortDir = State.sortDir === 'desc' ? 'asc' : 'desc'; savePrefs(); viewLibrary(); };
+  $('#viewBtn').onclick = () => { State.view = isGrid ? 'list' : 'grid'; savePrefs(); viewLibrary(); };
+}
+
+function bookCard(b) {
+  return `
+    <div class="book-card" onclick="location.hash='#/book/${attr(b.id)}'">
+      ${coverHtml(b)}
+      ${b.bookmarked || (b.status === 'read' && b.rating)
+        ? `<span class="corner">
+            ${b.bookmarked ? '★' : ''}
+            ${b.status === 'read' && b.rating ? renderRating(b.rating) : ''}
+          </span>`
+        : ''}
+      <div class="title">${esc(b.title || '(untitled)')}</div>
+      ${b.author ? `<div class="author">${esc(b.author)}</div>` : ''}
+    </div>`;
 }
 
 function bookRow(b) {
@@ -222,14 +297,28 @@ function applyFilter(books) {
   if (q) {
     out = out.filter(b => (b.title || '').toLowerCase().includes(q) || (b.author || '').toLowerCase().includes(q));
   }
+  // Base sorts produce a "natural" order. sortDir then reverses if 'asc'.
+  // Natural = the order that makes intuitive sense for the field:
+  //   title/author: A→Z (asc)
+  //   rating/date/recent: highest/newest first (desc)
+  let natural = 'desc';
   switch (State.sort) {
-    case 'title': out.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
-    case 'author': out.sort((a, b) => (a.author || '').localeCompare(b.author || '')); break;
-    case 'rating': out.sort((a, b) => (b.rating || 0) - (a.rating || 0)); break;
-    case 'date': out.sort((a, b) => (b.dateRead || '').localeCompare(a.dateRead || '')); break;
+    case 'title':
+      out.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+      natural = 'asc';
+      break;
+    case 'author':
+      out.sort((a, b) => (a.author || '').localeCompare(b.author || ''));
+      natural = 'asc';
+      break;
+    case 'rating':
+      out.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      break;
+    case 'date':
+      out.sort((a, b) => (b.dateRead || '').localeCompare(a.dateRead || ''));
+      break;
     case 'recent':
     default:
-      // bookmarked TBRs first, then by updatedAt
       out.sort((a, b) => {
         if (State.filter === 'tbr' || State.filter === 'bookmarked') {
           if (!!b.bookmarked - !!a.bookmarked) return (b.bookmarked?1:0) - (a.bookmarked?1:0);
@@ -237,6 +326,7 @@ function applyFilter(books) {
         return (b.updatedAt || '').localeCompare(a.updatedAt || '');
       });
   }
+  if (State.sortDir !== natural) out.reverse();
   return out;
 }
 
@@ -268,10 +358,6 @@ function viewDetail(id) {
       </div>
       ${b.notes ? `<div class="section-h">Notes</div><div class="notes">${esc(b.notes)}</div>` : ''}
       ${b.quotes && b.quotes.length ? `<div class="section-h">Quotes</div><ul class="quotes">${b.quotes.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
-      <div class="action-row">
-        <button onclick="location.hash='#/book/${attr(b.id)}/edit'">Edit</button>
-        <button class="danger" onclick="if(confirm('Delete this book?')){ window._del('${attr(b.id)}'); }">Delete</button>
-      </div>
     </div>`;
 }
 window._del = (id) => { deleteBook(id); toast('Deleted'); location.hash = '#/'; };
@@ -297,18 +383,6 @@ function viewEdit(id) {
         <label>Author</label>
         <input name="author" value="${attr(b.author)}" autocomplete="off">
       </div>
-      <div class="field">
-        <label>Cover</label>
-        <div class="cover-preview">
-          <div id="coverPrev">${coverHtml(b)}</div>
-          <div class="col">
-            <input name="coverUrl" id="coverUrl" value="${attr(b.coverUrl||'')}" placeholder="https://...">
-            <button type="button" onclick="window._findCovers()" id="fetchBtn">Find covers</button>
-            <div class="helper">Or paste any image URL above.</div>
-          </div>
-        </div>
-        <div id="coverPicker" style="display:none;margin-top:12px"></div>
-      </div>
       <div class="row">
         <div class="field">
           <label>Status</label>
@@ -325,18 +399,28 @@ function viewEdit(id) {
           </div>
         </div>
       </div>
-      <div id="readFields" style="${b.status==='read'?'':'display:none'}">
-        <div class="row">
-          <div class="field">
-            <label>Date read</label>
-            <input type="date" name="dateRead" value="${attr(b.dateRead||'')}">
+      <div class="field">
+        <label>Cover</label>
+        <div class="cover-preview">
+          <div id="coverPrev">${coverHtml(b)}</div>
+          <div class="col">
+            <input name="coverUrl" id="coverUrl" value="${attr(b.coverUrl||'')}" placeholder="https://...">
+            <button type="button" onclick="window._findCovers()" id="fetchBtn">Find covers</button>
+            <div class="helper">Or paste any image URL above.</div>
           </div>
-          <div class="field">
-            <label>Rating</label>
-            <div class="rating-pick" id="ratingPick">
-              ${[1,2,3,4].map(n => `<button type="button" class="dot ${(b.rating||0)>=n?'on':''}" data-r="${n}" aria-label="${n}"></button>`).join('')}
-              <span class="label" id="ratingLabel">${b.rating ? RATING_LABELS[b.rating] : ''}</span>
-            </div>
+        </div>
+        <div id="coverPicker" style="display:none;margin-top:12px"></div>
+      </div>
+      <div id="readFields" style="${b.status==='read'?'':'display:none'}">
+        <div class="field">
+          <label>Date read</label>
+          <input type="date" name="dateRead" value="${attr(b.dateRead||'')}">
+        </div>
+        <div class="field">
+          <label>Rating</label>
+          <div class="rating-pick" id="ratingPick">
+            ${[1,2,3,4].map(n => `<button type="button" class="dot ${(b.rating||0)>=n?'on':''}" data-r="${n}" aria-label="${n}"></button>`).join('')}
+            <span class="label" id="ratingLabel">${b.rating ? RATING_LABELS[b.rating] : ''}</span>
           </div>
         </div>
       </div>
@@ -376,7 +460,7 @@ function viewEdit(id) {
         <div id="quotes"></div>
         <button type="button" onclick="window._addQuote('')" style="margin-top:4px">+ Add quote</button>
       </div>
-      <div class="action-row">
+      <div class="action-row" style="margin-bottom:32px">
         <button type="submit" class="save-btn">Save</button>
         ${!isNew ? `<button type="button" class="danger" onclick="if(confirm('Delete this book?')){ window._del('${attr(b.id)}'); }">Delete</button>` : ''}
       </div>
@@ -613,26 +697,32 @@ function viewStats() {
   setHeader({ title: 'Stats' });
   const read = State.books.filter(b => b.status === 'read' && b.dateRead).slice().sort((a, b) => a.dateRead.localeCompare(b.dateRead));
   const thisYear = new Date().getFullYear();
-  const thisYearBooks = read.filter(b => b.dateRead.startsWith(String(thisYear)));
 
-  // books per year
-  const perYear = {};
-  read.forEach(b => { const y = b.dateRead.slice(0, 4); perYear[y] = (perYear[y] || 0) + 1; });
-  const years = Object.keys(perYear).sort();
-  const maxN = Math.max(0, ...Object.values(perYear));
+  const physicalAll = read.filter(b => b.medium !== 'audio');
+  const audioAll = read.filter(b => b.medium === 'audio');
+  const physicalThisYear = physicalAll.filter(b => b.dateRead.startsWith(String(thisYear)));
+  const audioThisYear = audioAll.filter(b => b.dateRead.startsWith(String(thisYear)));
 
-  // time per physical book (consecutive)
-  // assumption: physical books are read consecutively; time = days between previous physical read date and this one
-  const physical = read.filter(b => b.medium !== 'audio');
+  // books per year — physical only
+  const perYearBook = {};
+  physicalAll.forEach(b => { const y = b.dateRead.slice(0, 4); perYearBook[y] = (perYearBook[y] || 0) + 1; });
+  const bookYears = Object.keys(perYearBook).sort();
+  const maxBook = Math.max(0, ...Object.values(perYearBook));
+
+  // audiobooks per year
+  const perYearAudio = {};
+  audioAll.forEach(b => { const y = b.dateRead.slice(0, 4); perYearAudio[y] = (perYearAudio[y] || 0) + 1; });
+  const audioYears = Object.keys(perYearAudio).sort();
+  const maxAudio = Math.max(0, ...Object.values(perYearAudio));
+
+  // reading pace — physical, consecutive
   const times = [];
-  for (let i = 1; i < physical.length; i++) {
-    const a = new Date(physical[i - 1].dateRead);
-    const c = new Date(physical[i].dateRead);
+  for (let i = 1; i < physicalAll.length; i++) {
+    const a = new Date(physicalAll[i - 1].dateRead);
+    const c = new Date(physicalAll[i].dateRead);
     const days = Math.max(1, Math.round((c - a) / 86400000));
-    times.push({ book: physical[i], days });
+    times.push({ book: physicalAll[i], days });
   }
-  const recentTimes = times.slice(-12).reverse();
-  // avg pages/day across books with known pages
   const withPages = times.filter(t => t.book.pageCount);
   const avgDaysPerBook = times.length ? Math.round(times.reduce((s, t) => s + t.days, 0) / times.length) : null;
   const avgPagesPerDay = withPages.length
@@ -640,35 +730,47 @@ function viewStats() {
     : null;
 
   $('#app').innerHTML = `
-    <div class="stat-hero">
-      <div class="n">${thisYearBooks.length}</div>
-      <div class="l">books read in ${thisYear}</div>
+    <div class="stat-hero" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:24px 0 20px">
+      <div>
+        <div class="n">${physicalThisYear.length}</div>
+        <div class="l">books in ${thisYear}</div>
+      </div>
+      <div>
+        <div class="n">${audioThisYear.length}</div>
+        <div class="l">audiobooks in ${thisYear}</div>
+      </div>
     </div>
 
-    <div class="section-h">Books per year</div>
-    ${years.length ? `<div class="bar-chart">
-      ${years.map(y => `
+    <div class="section-h">Books per year <span style="text-transform:none;color:var(--text-mute)">· physical</span></div>
+    ${bookYears.length ? `<div class="bar-chart">
+      ${bookYears.map(y => `
         <div class="bar-row">
           <div>${y}</div>
-          <div class="bar"><div style="width:${(perYear[y]/maxN)*100}%"></div></div>
-          <div class="n">${perYear[y]}</div>
+          <div class="bar"><div style="width:${(perYearBook[y]/maxBook)*100}%"></div></div>
+          <div class="n">${perYearBook[y]}</div>
         </div>`).join('')}
     </div>` : `<div class="empty">No data yet.</div>`}
 
-    <div class="section-h">Reading pace <span style="text-transform:none;color:var(--text-mute)">(physical books only)</span></div>
+    <div class="section-h">Audiobooks per year</div>
+    ${audioYears.length ? `<div class="bar-chart">
+      ${audioYears.map(y => `
+        <div class="bar-row">
+          <div>${y}</div>
+          <div class="bar"><div style="width:${(perYearAudio[y]/maxAudio)*100}%;background:var(--text-soft)"></div></div>
+          <div class="n">${perYearAudio[y]}</div>
+        </div>`).join('')}
+    </div>
+    <div class="meta-grid" style="margin-top:14px">
+      <div><div class="k">Total audiobooks</div><div class="v">${audioAll.length}</div></div>
+      <div><div class="k">This year</div><div class="v">${audioThisYear.length}</div></div>
+    </div>` : `<div class="empty">No audiobooks logged yet.</div>`}
+
+    <div class="section-h">Reading pace <span style="text-transform:none;color:var(--text-mute)">· physical</span></div>
     <div class="meta-grid">
       <div><div class="k">Avg days / book</div><div class="v">${avgDaysPerBook ?? '—'}</div></div>
       <div><div class="k">Avg pages / day</div><div class="v">${avgPagesPerDay ?? '—'}</div></div>
     </div>
-
-    <div class="section-h">Recent — time taken</div>
-    ${recentTimes.length ? `<ul class="read-list-mini">
-      ${recentTimes.map(t => `
-        <li onclick="location.hash='#/book/${attr(t.book.id)}'">
-          <div class="t">${esc(t.book.title)}</div>
-          <div class="d">${t.days}d${t.book.pageCount ? ` · ${Math.round(t.book.pageCount / t.days)} p/d` : ''}</div>
-        </li>`).join('')}
-    </ul>` : `<div class="empty">Need at least two consecutive physical reads.</div>`}
+    <div style="height:32px"></div>
   `;
 }
 
@@ -680,11 +782,20 @@ function viewMap() {
     $('#app').innerHTML = `<div class="empty">Map library failed to load.</div>`;
     return;
   }
-  const map = L.map('map', { zoomControl: true, scrollWheelZoom: true }).setView([20, 0], 2);
+  const map = L.map('map', {
+    zoomControl: true,
+    scrollWheelZoom: true,
+    worldCopyJump: true,
+    minZoom: 2,
+    maxBounds: [[-85, -200], [85, 200]],
+    maxBoundsViscosity: 1.0,
+  }).setView([30, 10], 3);
   window._map = map;
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap'
+    minZoom: 2,
+    attribution: '&copy; OpenStreetMap',
+    noWrap: false,
   }).addTo(map);
   const pts = State.books.filter(b => b.lat != null && b.lng != null);
   const ungeocoded = State.books.filter(b => b.location && b.lat == null);
@@ -695,7 +806,12 @@ function viewMap() {
     m.addTo(group);
   });
   group.addTo(map);
-  if (pts.length) map.fitBounds(group.getBounds().pad(0.2));
+  if (pts.length) {
+    // tight padding + maxZoom cap so a single cluster doesn't zoom to street level
+    map.fitBounds(group.getBounds(), { padding: [24, 24], maxZoom: 6 });
+  }
+  // ensure tiles are sized correctly once the container is visible
+  setTimeout(() => map.invalidateSize(), 60);
 
   if (ungeocoded.length) {
     const banner = document.createElement('div');
@@ -723,6 +839,223 @@ function viewMap() {
     };
   }
 }
+
+// ---------- challenges ----------
+const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
+function stripArticle(s) {
+  return String(s || '').replace(/^(the|a|an)\s+/i, '').trim();
+}
+function firstLetter(s) {
+  const t = stripArticle(s);
+  const m = t.match(/[A-Za-z]/);
+  return m ? m[0].toUpperCase() : null;
+}
+function extractCountry(loc) {
+  if (!loc) return null;
+  // take last comma-separated chunk as country (handles "Dublin, Ireland" → "Ireland")
+  const parts = String(loc).split(',').map(s => s.trim()).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+function challengeProgress(ch) {
+  const books = State.books;
+  switch (ch.type) {
+    case 'alphabet': {
+      const read = books.filter(b => b.status === 'read');
+      const letters = {};
+      ALPHABET.forEach(L => letters[L] = null);
+      // sort by date read so the earliest match for each letter wins
+      read.slice().sort((a, b) => (a.dateRead || '').localeCompare(b.dateRead || '')).forEach(b => {
+        const L = firstLetter(b.title);
+        if (L && letters[L] == null) letters[L] = b;
+      });
+      const done = ALPHABET.filter(L => letters[L]).length;
+      return { done, total: 26, letters };
+    }
+    case 'country': {
+      const countries = new Map(); // country -> {books:[], read:0}
+      books.forEach(b => {
+        const c = extractCountry(b.location);
+        if (!c) return;
+        if (!countries.has(c)) countries.set(c, { books: [], read: 0 });
+        const e = countries.get(c);
+        e.books.push(b);
+        if (b.status === 'read') e.read++;
+      });
+      // only count countries with at least one read book toward "done"
+      const done = [...countries.values()].filter(e => e.read > 0).length;
+      const list = [...countries.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([name, e]) => ({ name, books: e.books, read: e.read }));
+      return { done, total: list.length, list };
+    }
+    case 'author': {
+      const target = (ch.target || '').toLowerCase().trim();
+      const matches = books.filter(b => (b.author || '').toLowerCase().trim() === target);
+      const read = matches.filter(b => b.status === 'read').length;
+      return { done: read, total: matches.length, list: matches };
+    }
+    case 'genre': {
+      const target = (ch.target || '').toLowerCase().trim();
+      const matches = books.filter(b => (b.genre || '').toLowerCase().includes(target));
+      const read = matches.filter(b => b.status === 'read').length;
+      return { done: read, total: matches.length, list: matches };
+    }
+    default:
+      return { done: 0, total: 0 };
+  }
+}
+
+function viewChallenges() {
+  setHeader({
+    title: 'Challenges',
+    right: `<a href="#/challenge/new" class="icon-btn" aria-label="New challenge"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>`
+  });
+  const list = State.challenges || [];
+  if (!list.length) {
+    $('#app').innerHTML = `<div class="empty">No challenges yet. Tap + to create one.</div>`;
+    return;
+  }
+  $('#app').innerHTML = `<div>${list.map(challengeCard).join('')}</div>`;
+}
+
+function challengeCard(ch) {
+  const p = challengeProgress(ch);
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+  let body = '';
+  switch (ch.type) {
+    case 'alphabet':
+      body = `
+        <div class="alpha-grid">
+          ${ALPHABET.map(L => `
+            <div class="alpha-cell ${p.letters[L] ? 'on' : ''}"
+                 ${p.letters[L] ? `onclick="event.stopPropagation();location.hash='#/book/${attr(p.letters[L].id)}'"` : ''}
+                 title="${p.letters[L] ? attr(p.letters[L].title) : ''}">${L}</div>`).join('')}
+        </div>`;
+      break;
+    case 'country':
+      body = `
+        <ul class="ch-list">
+          ${p.list.slice(0, 50).map(c => `
+            <li>
+              <span class="mark">${c.read ? '✓' : '·'}</span>
+              <span class="title">${esc(c.name)}</span>
+              <span class="sub">${c.read}${c.books.length > c.read ? '+'+(c.books.length-c.read)+' TBR' : ''}</span>
+            </li>`).join('')}
+        </ul>`;
+      break;
+    case 'author':
+    case 'genre':
+      body = p.list.length
+        ? `<ul class="ch-list">
+            ${p.list.slice(0, 20).map(b => `
+              <li onclick="event.stopPropagation();location.hash='#/book/${attr(b.id)}'">
+                <span class="mark">${b.status==='read'?'✓':'·'}</span>
+                <span class="title">${esc(b.title)}</span>
+                <span class="ch-status-pill ${b.status==='read'?'read':''}">${b.status==='read'?'read':'tbr'}</span>
+              </li>`).join('')}
+          </ul>`
+        : `<div class="helper">No matching books in your library yet.</div>`;
+      break;
+  }
+  const progressText = ch.type === 'country' || ch.type === 'author' || ch.type === 'genre'
+    ? `${p.done}${p.total ? ' / ' + p.total : ''}`
+    : `${p.done} / ${p.total}`;
+  return `
+    <div class="ch-card">
+      <button class="ch-menu-btn" onclick="location.hash='#/challenge/${attr(ch.id)}/edit'" aria-label="Edit challenge">⋯</button>
+      <div class="ch-hd">
+        <div class="ch-name">${esc(ch.name)}</div>
+        <div class="ch-progress">${progressText}</div>
+      </div>
+      ${ch.description ? `<div class="ch-desc">${esc(ch.description)}</div>` : ''}
+      ${p.total ? `<div class="ch-bar"><div style="width:${pct}%"></div></div>` : ''}
+      ${body}
+    </div>`;
+}
+
+function viewChallengeEdit(id) {
+  const isNew = !id;
+  const ch = isNew
+    ? { id: 'ch_' + uid(), type: 'alphabet', name: '', description: '', target: '' }
+    : Object.assign({}, (State.challenges || []).find(c => c.id === id));
+  if (!isNew && !ch.id) { $('#app').innerHTML = `<div class="empty">Not found</div>`; return; }
+  setHeader({
+    title: isNew ? 'New challenge' : 'Edit challenge',
+    back: true,
+    right: `<button class="icon-btn" onclick="window._saveChallenge()" aria-label="Save"><svg viewBox="0 0 24 24" stroke-width="1.6" stroke="currentColor" fill="none"><path d="M5 13l4 4L19 7"/></svg></button>`
+  });
+  $('#app').innerHTML = `
+    <form class="form" onsubmit="event.preventDefault();window._saveChallenge();" id="chForm">
+      <div class="field">
+        <label>Type</label>
+        <select name="type" id="chType">
+          <option value="alphabet" ${ch.type==='alphabet'?'selected':''}>Alphabet — one book per letter</option>
+          <option value="country" ${ch.type==='country'?'selected':''}>Country — books by country</option>
+          <option value="author" ${ch.type==='author'?'selected':''}>Author — all books by an author</option>
+          <option value="genre" ${ch.type==='genre'?'selected':''}>Genre — books in a genre</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Name</label>
+        <input name="name" value="${attr(ch.name)}" placeholder="e.g. Read the alphabet" required>
+      </div>
+      <div class="field" id="targetField" style="${(ch.type==='author'||ch.type==='genre')?'':'display:none'}">
+        <label>Target <span style="text-transform:none;color:var(--text-mute)" id="targetHint">(author name)</span></label>
+        <input name="target" value="${attr(ch.target||'')}" placeholder="e.g. Margaret Atwood">
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea name="description" rows="2">${esc(ch.description||'')}</textarea>
+      </div>
+      <div class="action-row" style="margin-bottom:32px">
+        <button type="submit" class="save-btn">Save</button>
+        ${!isNew ? `<button type="button" class="danger" onclick="if(confirm('Delete this challenge?')){ window._delChallenge('${attr(ch.id)}'); }">Delete</button>` : ''}
+      </div>
+    </form>
+  `;
+  $('#chType').onchange = e => {
+    const t = e.target.value;
+    const showTarget = t === 'author' || t === 'genre';
+    $('#targetField').style.display = showTarget ? '' : 'none';
+    $('#targetHint').textContent = t === 'author' ? '(author name)' : '(genre name — substring match)';
+  };
+}
+
+window._saveChallenge = () => {
+  const form = $('#chForm');
+  if (!form.reportValidity()) return;
+  const fd = new FormData(form);
+  const id = (State.challenges || []).find(c => c.name && c.name === fd.get('name'))?.id;
+  // figure out id from URL hash if editing
+  const m = location.hash.match(/^#\/challenge\/([^/]+)\/edit$/);
+  const editId = m ? m[1] : null;
+  const finalId = editId || 'ch_' + uid();
+  const updated = {
+    id: finalId,
+    type: fd.get('type'),
+    name: (fd.get('name') || '').trim(),
+    description: (fd.get('description') || '').trim() || null,
+  };
+  const target = (fd.get('target') || '').trim();
+  if (target) updated.target = target;
+  if (!State.challenges) State.challenges = [];
+  const i = State.challenges.findIndex(c => c.id === finalId);
+  if (i >= 0) State.challenges[i] = updated; else State.challenges.push(updated);
+  State.dirty = true;
+  persist();
+  toast('Saved');
+  location.hash = '#/challenges';
+};
+
+window._delChallenge = (id) => {
+  State.challenges = (State.challenges || []).filter(c => c.id !== id);
+  State.dirty = true;
+  persist();
+  toast('Deleted');
+  location.hash = '#/challenges';
+};
 
 // ---------- settings ----------
 function viewSettings() {
@@ -800,7 +1133,7 @@ window._saveCfg = () => {
 };
 
 window._exportJson = () => {
-  const doc = { version: 1, updatedAt: nowIso(), books: State.books };
+  const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
   const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -819,6 +1152,7 @@ window._importJson = (e) => {
       if (!Array.isArray(incoming)) throw new Error('Invalid file');
       if (!confirm(`Replace ${State.books.length} books with ${incoming.length} from file?`)) return;
       State.books = incoming;
+      if (Array.isArray(doc.challenges)) State.challenges = doc.challenges;
       State.dirty = true;
       persist();
       toast('Imported');
@@ -860,7 +1194,7 @@ window._sync = async () => {
     } else if (head.status !== 404) {
       throw new Error(`HEAD ${head.status}`);
     }
-    const doc = { version: 1, updatedAt: nowIso(), books: State.books };
+    const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
     const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))));
     const put = await fetch(api, {
       method: 'PUT',

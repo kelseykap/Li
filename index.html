@@ -131,8 +131,11 @@
   }
   .pill.on { background: var(--text); color: var(--bg); border-color: var(--text); }
   .search-row { display: flex; gap: 8px; padding-bottom: 8px; }
-  .search-row input { flex: 1; }
+  .search-row input { flex: 1; min-width: 0; }
   .search-row select { width: auto; }
+  .search-row .icon-btn { width: 36px; height: 36px; flex: 0 0 36px; border: 1px solid var(--line-strong); border-radius: var(--radius); }
+  .search-row .icon-btn.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .search-row .icon-btn svg { width: 16px; height: 16px; }
 
   /* book list */
   .book-list { list-style: none; padding: 0; margin: 0; }
@@ -166,6 +169,58 @@
   .rating-dots .d.on { background: var(--text); }
   .rating-dots.accent .d.on { background: var(--accent); }
   .empty { color: var(--text-mute); text-align: center; padding: 40px 16px; }
+
+  /* grid view */
+  .book-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 18px 12px;
+    padding: 8px 0 4px;
+  }
+  .book-card { position: relative; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
+  .book-card .cover, .book-card .cover-placeholder {
+    width: 100%; height: auto; aspect-ratio: 2 / 3;
+    border-radius: 2px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+  }
+  .book-card .cover-placeholder { font-size: 28px; }
+  .book-card .title { font-size: 12px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .book-card .author { font-size: 11px; color: var(--text-mute); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .book-card .corner { position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; align-items: center; background: rgba(0,0,0,0.45); color: #fff; border-radius: 999px; padding: 2px 6px; font-size: 11px; line-height: 1; }
+  .book-card .corner .rating-dots .d { background: rgba(255,255,255,0.3); width: 5px; height: 5px; }
+  .book-card .corner .rating-dots .d.on { background: #fff; }
+
+  /* challenges */
+  .ch-card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 14px; margin-bottom: 12px;
+    position: relative;
+  }
+  .ch-card .ch-hd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .ch-card .ch-name { font-weight: 500; font-size: 15px; }
+  .ch-card .ch-progress { color: var(--text-soft); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ch-card .ch-desc { color: var(--text-mute); font-size: 12px; margin-bottom: 10px; }
+  .ch-bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin: 8px 0 12px; }
+  .ch-bar > div { height: 100%; background: var(--accent); transition: width 0.3s; }
+  .alpha-grid {
+    display: grid; grid-template-columns: repeat(13, 1fr); gap: 4px;
+    margin-top: 8px;
+  }
+  .alpha-cell {
+    aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+    background: var(--line); border-radius: 3px;
+    font-size: 11px; font-weight: 500; color: var(--text-mute);
+  }
+  .alpha-cell.on { background: var(--accent); color: #fff; }
+  .ch-list { list-style: none; padding: 0; margin: 4px 0 0; max-height: 180px; overflow-y: auto; }
+  .ch-list li { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; padding: 5px 0; font-size: 13px; align-items: baseline; border-bottom: 1px solid var(--line); }
+  .ch-list li:last-child { border-bottom: 0; }
+  .ch-list .mark { color: var(--accent); }
+  .ch-list .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ch-list .sub { color: var(--text-mute); font-size: 11px; }
+  .ch-menu-btn { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: var(--text-mute); font-size: 18px; line-height: 1; }
+  .ch-status-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; background: var(--line); color: var(--text-soft); margin-left: 4px; }
+  .ch-status-pill.read { background: var(--accent-soft); color: var(--accent); }
 
   /* detail */
   .detail .cover-hero { display: flex; justify-content: center; padding: 16px 0 20px; }
@@ -299,9 +354,9 @@
       <svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/></svg>
       Stats
     </a>
-    <a href="#/add" data-nav="add" class="add">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
-      Add
+    <a href="#/challenges" data-nav="challenges">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+      Challenges
     </a>
     <a href="#/map" data-nav="map">
       <svg viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2zM9 4v14M15 6v14"/></svg>
