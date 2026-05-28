@@ -1,0 +1,900 @@
+/* Library - book tracker
+   Single-page hash-routed app. Books stored in books.json (in repo),
+   working copy in localStorage. Sync to GitHub via PAT.
+*/
+(() => {
+'use strict';
+
+// ---------- helpers ----------
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const attr = (s) => esc(s);
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const nowIso = () => new Date().toISOString();
+const fmtDate = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+};
+const RATING_LABELS = { 1: 'ok', 2: 'good', 3: 'loved', 4: 'favourite' };
+const debounce = (fn, ms = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+const toast = (msg, ms = 1800) => {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('show'), ms);
+};
+
+// ---------- state ----------
+const STORE_KEY = 'lib.books.v1';
+const CFG_KEY = 'lib.cfg.v1';
+const PAT_KEY = 'lib.pat.v1'; // separated so it can be wiped independently
+
+const State = {
+  books: [],
+  filter: 'all', // all | read | tbr | bookmarked
+  sort: 'recent',
+  search: '',
+  loaded: false,
+  dirty: false, // true if local changes not pushed to GitHub
+  config: { owner: '', repo: '', branch: 'main', path: 'books.json' },
+};
+
+function loadConfig() {
+  try { State.config = Object.assign(State.config, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch {}
+}
+function saveConfig() { localStorage.setItem(CFG_KEY, JSON.stringify(State.config)); }
+function getPat() { return localStorage.getItem(PAT_KEY) || ''; }
+function setPat(v) { v ? localStorage.setItem(PAT_KEY, v) : localStorage.removeItem(PAT_KEY); }
+
+// ---------- storage ----------
+async function loadBooks() {
+  loadConfig();
+  // localStorage has working copy; books.json in repo is the source of truth on first load
+  const local = localStorage.getItem(STORE_KEY);
+  if (local) {
+    try {
+      const doc = JSON.parse(local);
+      State.books = doc.books || [];
+      State.dirty = !!doc.dirty;
+      State.loaded = true;
+      return;
+    } catch {}
+  }
+  // First load from books.json shipped in repo
+  try {
+    const r = await fetch('books.json', { cache: 'no-store' });
+    if (r.ok) {
+      const doc = await r.json();
+      State.books = doc.books || [];
+      State.dirty = false;
+      persist();
+      State.loaded = true;
+      return;
+    }
+  } catch {}
+  State.books = [];
+  State.loaded = true;
+}
+
+function persist() {
+  const doc = { version: 1, updatedAt: nowIso(), dirty: State.dirty, books: State.books };
+  localStorage.setItem(STORE_KEY, JSON.stringify(doc));
+}
+
+function upsertBook(book) {
+  book.updatedAt = nowIso();
+  if (!book.id) book.id = uid();
+  if (!book.createdAt) book.createdAt = nowIso();
+  const i = State.books.findIndex(b => b.id === book.id);
+  if (i >= 0) State.books[i] = book; else State.books.unshift(book);
+  State.dirty = true;
+  persist();
+}
+function deleteBook(id) {
+  State.books = State.books.filter(b => b.id !== id);
+  State.dirty = true;
+  persist();
+}
+function getBook(id) { return State.books.find(b => b.id === id); }
+
+// ---------- header ----------
+function setHeader({ title = 'Library', back = false, right = '' } = {}) {
+  $('#header').innerHTML = `
+    ${back ? `<button class="icon-btn" onclick="history.back()" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>` : `<span style="width:36px"></span>`}
+    <h1>${esc(title)}</h1>
+    ${right || `<span style="width:36px"></span>`}
+  `;
+}
+function updateNav() {
+  const route = location.hash || '#/';
+  $$('.nav a').forEach(a => {
+    const target = a.getAttribute('href');
+    a.classList.toggle('active', target === route || (target === '#/' && route === '#/'));
+  });
+}
+
+// ---------- router ----------
+const routes = [
+  { re: /^#\/?$/, view: viewLibrary },
+  { re: /^#\/book\/([^/]+)\/edit$/, view: (m) => viewEdit(m[1]) },
+  { re: /^#\/book\/([^/]+)$/, view: (m) => viewDetail(m[1]) },
+  { re: /^#\/add$/, view: () => viewEdit(null) },
+  { re: /^#\/stats$/, view: viewStats },
+  { re: /^#\/map$/, view: viewMap },
+  { re: /^#\/settings$/, view: viewSettings },
+];
+function route() {
+  const hash = location.hash || '#/';
+  // clean up any map instance
+  if (window._map) { window._map.remove(); window._map = null; }
+  for (const r of routes) {
+    const m = hash.match(r.re);
+    if (m) { r.view(m); updateNav(); window.scrollTo(0, 0); return; }
+  }
+  $('#app').innerHTML = `<div class="empty">Not found. <a href="#/">Go home</a></div>`;
+}
+window.addEventListener('hashchange', route);
+
+// ---------- views ----------
+function renderRating(r, big = false) {
+  let html = `<span class="rating-dots ${big ? 'accent' : ''}">`;
+  for (let i = 1; i <= 4; i++) html += `<span class="d ${r >= i ? 'on' : ''}"></span>`;
+  html += `</span>`;
+  return html;
+}
+function coverHtml(b, size = 'small') {
+  if (b.coverUrl) {
+    return `<img class="cover" loading="lazy" src="${attr(b.coverUrl)}" alt="" onerror="this.outerHTML='<div class=\\'cover-placeholder ${size==='big'?'big':''}\\'>${esc((b.title||'?')[0]||'?')}</div>'">`;
+  }
+  return `<div class="cover-placeholder ${size==='big'?'big':''}">${esc((b.title || '?')[0] || '?')}</div>`;
+}
+
+function viewLibrary() {
+  setHeader({ title: 'Library' });
+  const app = $('#app');
+  const filtered = applyFilter(State.books);
+  const counts = {
+    all: State.books.length,
+    read: State.books.filter(b => b.status === 'read').length,
+    tbr: State.books.filter(b => b.status === 'tbr').length,
+    bookmarked: State.books.filter(b => b.bookmarked).length,
+  };
+  app.innerHTML = `
+    <div class="filters">
+      ${['all','read','tbr','bookmarked'].map(f => `
+        <button class="pill ${State.filter===f?'on':''}" data-f="${f}">
+          ${f === 'all' ? 'All' : f === 'read' ? 'Read' : f === 'tbr' ? 'TBR' : 'Bookmarked'}
+          <span style="opacity:0.55"> ${counts[f]}</span>
+        </button>`).join('')}
+    </div>
+    <div class="search-row">
+      <input type="search" placeholder="Search title or author" value="${attr(State.search)}" id="search">
+      <select id="sort">
+        ${[
+          ['recent','Recent'],
+          ['title','Title'],
+          ['author','Author'],
+          ['rating','Rating ↓'],
+          ['date','Date read ↓'],
+        ].map(([v,l]) => `<option value="${v}" ${State.sort===v?'selected':''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    ${filtered.length === 0
+      ? `<div class="empty">${State.search ? 'No matches.' : 'No books yet. Tap + to add one.'}</div>`
+      : `<ul class="book-list">${filtered.map(bookRow).join('')}</ul>`}
+    ${State.dirty ? `<div class="empty" style="font-size:12px;padding:24px 0 0">Unsaved changes · <a href="#/settings" style="text-decoration:underline">sync to GitHub</a></div>` : ''}
+  `;
+  $$('.pill').forEach(p => p.onclick = () => { State.filter = p.dataset.f; viewLibrary(); });
+  $('#search').oninput = debounce(e => { State.search = e.target.value; viewLibrary(); }, 150);
+  $('#sort').onchange = e => { State.sort = e.target.value; viewLibrary(); };
+}
+
+function bookRow(b) {
+  const metaBits = [];
+  if (b.status === 'read' && b.dateRead) metaBits.push(fmtDate(b.dateRead));
+  if (b.medium === 'audio') metaBits.push('audio');
+  if (b.genre) metaBits.push(esc(b.genre));
+  return `
+    <li class="book-row" onclick="location.hash='#/book/${attr(b.id)}'">
+      ${coverHtml(b)}
+      <div>
+        <div class="title">${esc(b.title || '(untitled)')}</div>
+        <div class="author">${esc(b.author || '')}</div>
+        <div class="meta">${metaBits.join(' · ')}</div>
+      </div>
+      <div class="right">
+        ${b.bookmarked ? `<span class="bookmark-on" title="Bookmarked">★</span>` : ''}
+        ${b.status === 'read' && b.rating ? renderRating(b.rating) : `<span class="badge">${b.status === 'tbr' ? 'TBR' : ''}</span>`}
+      </div>
+    </li>`;
+}
+
+function applyFilter(books) {
+  let out = books.slice();
+  if (State.filter === 'read') out = out.filter(b => b.status === 'read');
+  else if (State.filter === 'tbr') out = out.filter(b => b.status === 'tbr');
+  else if (State.filter === 'bookmarked') out = out.filter(b => b.bookmarked);
+  const q = State.search.trim().toLowerCase();
+  if (q) {
+    out = out.filter(b => (b.title || '').toLowerCase().includes(q) || (b.author || '').toLowerCase().includes(q));
+  }
+  switch (State.sort) {
+    case 'title': out.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
+    case 'author': out.sort((a, b) => (a.author || '').localeCompare(b.author || '')); break;
+    case 'rating': out.sort((a, b) => (b.rating || 0) - (a.rating || 0)); break;
+    case 'date': out.sort((a, b) => (b.dateRead || '').localeCompare(a.dateRead || '')); break;
+    case 'recent':
+    default:
+      // bookmarked TBRs first, then by updatedAt
+      out.sort((a, b) => {
+        if (State.filter === 'tbr' || State.filter === 'bookmarked') {
+          if (!!b.bookmarked - !!a.bookmarked) return (b.bookmarked?1:0) - (a.bookmarked?1:0);
+        }
+        return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+      });
+  }
+  return out;
+}
+
+function viewDetail(id) {
+  const b = getBook(id);
+  if (!b) { $('#app').innerHTML = `<div class="empty">Not found</div>`; return; }
+  setHeader({
+    title: '',
+    back: true,
+    right: `<button class="icon-btn" onclick="location.hash='#/book/${attr(b.id)}/edit'" aria-label="Edit"><svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`
+  });
+  const meta = [];
+  if (b.dateRead) meta.push(['Date read', fmtDate(b.dateRead)]);
+  if (b.medium) meta.push(['Medium', b.medium === 'audio' ? 'Audiobook' : 'Book']);
+  if (b.pageCount) meta.push(['Pages', String(b.pageCount)]);
+  if (b.publicationDate) meta.push(['Published', fmtDate(b.publicationDate)]);
+  if (b.location) meta.push(['Location', esc(b.location)]);
+  if (b.genre) meta.push(['Genre', esc(b.genre)]);
+  if (b.status === 'read' && b.rating) meta.push(['Rating', `${renderRating(b.rating, true)} <span style="color:var(--text-soft);margin-left:6px">${RATING_LABELS[b.rating]}</span>`]);
+  if (b.status === 'tbr') meta.push(['Status', b.bookmarked ? 'TBR · bookmarked' : 'TBR']);
+
+  $('#app').innerHTML = `
+    <div class="detail">
+      <div class="cover-hero">${coverHtml(b, 'big')}</div>
+      <h2>${esc(b.title || '(untitled)')}</h2>
+      <div class="author">${esc(b.author || '')}</div>
+      <div class="meta-grid">
+        ${meta.map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')}
+      </div>
+      ${b.notes ? `<div class="section-h">Notes</div><div class="notes">${esc(b.notes)}</div>` : ''}
+      ${b.quotes && b.quotes.length ? `<div class="section-h">Quotes</div><ul class="quotes">${b.quotes.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
+      <div class="action-row">
+        <button onclick="location.hash='#/book/${attr(b.id)}/edit'">Edit</button>
+        <button class="danger" onclick="if(confirm('Delete this book?')){ window._del('${attr(b.id)}'); }">Delete</button>
+      </div>
+    </div>`;
+}
+window._del = (id) => { deleteBook(id); toast('Deleted'); location.hash = '#/'; };
+
+function viewEdit(id) {
+  const isNew = !id;
+  const b = isNew
+    ? { id: uid(), title: '', author: '', status: 'tbr', medium: 'book', quotes: [], bookmarked: false, rating: null }
+    : Object.assign({ quotes: [] }, getBook(id));
+  if (!b.id && !isNew) { $('#app').innerHTML = `<div class="empty">Not found</div>`; return; }
+  setHeader({
+    title: isNew ? 'Add book' : 'Edit',
+    back: true,
+    right: `<button class="icon-btn" onclick="window._saveBook()" aria-label="Save"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></button>`
+  });
+  $('#app').innerHTML = `
+    <form class="form" onsubmit="event.preventDefault();window._saveBook();" id="bookForm">
+      <div class="field">
+        <label>Title</label>
+        <input name="title" value="${attr(b.title)}" autocomplete="off" required>
+      </div>
+      <div class="field">
+        <label>Author</label>
+        <input name="author" value="${attr(b.author)}" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Cover</label>
+        <div class="cover-preview">
+          <div id="coverPrev">${coverHtml(b)}</div>
+          <div class="col">
+            <input name="coverUrl" id="coverUrl" value="${attr(b.coverUrl||'')}" placeholder="https://...">
+            <button type="button" onclick="window._fetchCover()" id="fetchBtn">Find cover from Open Library</button>
+            <div class="helper">Or paste any image URL above.</div>
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Status</label>
+          <div class="seg">
+            <button type="button" data-status="read" class="${b.status==='read'?'on':''}">Read</button>
+            <button type="button" data-status="tbr" class="${b.status==='tbr'?'on':''}">TBR</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Medium</label>
+          <div class="seg">
+            <button type="button" data-medium="book" class="${b.medium!=='audio'?'on':''}">Book</button>
+            <button type="button" data-medium="audio" class="${b.medium==='audio'?'on':''}">Audio</button>
+          </div>
+        </div>
+      </div>
+      <div id="readFields" style="${b.status==='read'?'':'display:none'}">
+        <div class="row">
+          <div class="field">
+            <label>Date read</label>
+            <input type="date" name="dateRead" value="${attr(b.dateRead||'')}">
+          </div>
+          <div class="field">
+            <label>Rating</label>
+            <div class="rating-pick" id="ratingPick">
+              ${[1,2,3,4].map(n => `<button type="button" class="dot ${(b.rating||0)>=n?'on':''}" data-r="${n}" aria-label="${n}"></button>`).join('')}
+              <span class="label" id="ratingLabel">${b.rating ? RATING_LABELS[b.rating] : ''}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="tbrFields" style="${b.status==='tbr'?'':'display:none'}">
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0">
+            <input type="checkbox" name="bookmarked" ${b.bookmarked?'checked':''} style="width:auto">
+            <span>Bookmark (prioritise)</span>
+          </label>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Pages</label>
+          <input type="number" name="pageCount" value="${attr(b.pageCount||'')}" min="1">
+        </div>
+        <div class="field">
+          <label>Published</label>
+          <input type="date" name="publicationDate" value="${attr(b.publicationDate||'')}">
+        </div>
+      </div>
+      <div class="field">
+        <label>Location <span style="text-transform:none;color:var(--text-mute)">(setting of the book)</span></label>
+        <input name="location" value="${attr(b.location||'')}" placeholder="e.g. Dublin, Ireland" autocomplete="off">
+        <div class="helper">Geocoded for the map on save.</div>
+      </div>
+      <div class="field">
+        <label>Genre</label>
+        <input name="genre" value="${attr(b.genre||'')}" autocomplete="off" placeholder="e.g. Love, Time-travel, Non-fiction">
+      </div>
+      <div class="field">
+        <label>Notes</label>
+        <textarea name="notes">${esc(b.notes||'')}</textarea>
+      </div>
+      <div class="field">
+        <label>Quotes</label>
+        <div id="quotes"></div>
+        <button type="button" onclick="window._addQuote('')" style="margin-top:4px">+ Add quote</button>
+      </div>
+      <div class="action-row">
+        <button type="submit" class="save-btn">Save</button>
+        ${!isNew ? `<button type="button" class="danger" onclick="if(confirm('Delete this book?')){ window._del('${attr(b.id)}'); }">Delete</button>` : ''}
+      </div>
+    </form>
+  `;
+  // segments
+  $$('[data-status]').forEach(btn => btn.onclick = () => {
+    $$('[data-status]').forEach(x => x.classList.remove('on'));
+    btn.classList.add('on');
+    const isRead = btn.dataset.status === 'read';
+    $('#readFields').style.display = isRead ? '' : 'none';
+    $('#tbrFields').style.display = isRead ? 'none' : '';
+  });
+  $$('[data-medium]').forEach(btn => btn.onclick = () => {
+    $$('[data-medium]').forEach(x => x.classList.remove('on'));
+    btn.classList.add('on');
+  });
+  // rating dots
+  $$('#ratingPick .dot').forEach(d => {
+    d.onclick = () => {
+      const v = +d.dataset.r;
+      const cur = +(getRating() || 0);
+      const next = cur === v ? null : v;
+      $$('#ratingPick .dot').forEach(x => x.classList.toggle('on', next ? +x.dataset.r <= next : false));
+      $('#ratingLabel').textContent = next ? RATING_LABELS[next] : '';
+      $('#ratingPick').dataset.value = next || '';
+    };
+  });
+  if (b.rating) $('#ratingPick').dataset.value = b.rating;
+
+  // quotes
+  const qWrap = $('#quotes');
+  const renderQuotes = (qs) => {
+    qWrap.innerHTML = qs.map((q, i) => `
+      <div class="quote-edit">
+        <textarea data-qi="${i}">${esc(q)}</textarea>
+        <button type="button" onclick="window._rmQuote(${i})">×</button>
+      </div>`).join('');
+    qWrap._quotes = qs;
+  };
+  window._addQuote = (txt) => {
+    const qs = (qWrap._quotes || []).concat([txt || '']);
+    renderQuotes(qs);
+  };
+  window._rmQuote = (i) => {
+    const qs = (qWrap._quotes || []).slice();
+    qs.splice(i, 1);
+    renderQuotes(qs);
+  };
+  renderQuotes(b.quotes || []);
+
+  // cover preview live-update on URL change
+  $('#coverUrl').oninput = (e) => {
+    const url = e.target.value.trim();
+    $('#coverPrev').innerHTML = url
+      ? `<img class="cover" src="${attr(url)}" alt="">`
+      : `<div class="cover-placeholder">?</div>`;
+  };
+
+  // helpers reachable globally
+  function getRating() { return $('#ratingPick').dataset.value || null; }
+  window._getRating = getRating;
+
+  window._fetchCover = async () => {
+    const t = $('[name="title"]').value.trim();
+    const a = $('[name="author"]').value.trim();
+    if (!t) { toast('Add a title first'); return; }
+    const btn = $('#fetchBtn');
+    btn.innerHTML = '<span class="spin"></span> Searching…';
+    btn.disabled = true;
+    try {
+      const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(t)}${a ? '&author=' + encodeURIComponent(a) : ''}&limit=5`;
+      const r = await fetch(url);
+      const j = await r.json();
+      const hit = (j.docs || []).find(d => d.cover_i) || null;
+      if (!hit) { toast('No cover found'); return; }
+      const coverUrl = `https://covers.openlibrary.org/b/id/${hit.cover_i}-L.jpg`;
+      $('#coverUrl').value = coverUrl;
+      $('#coverUrl').dispatchEvent(new Event('input'));
+      // also fill missing meta from result, but never overwrite
+      const fillIfBlank = (sel, val) => { if (val && !$(sel).value) $(sel).value = val; };
+      fillIfBlank('[name="author"]', (hit.author_name || [])[0]);
+      if (hit.first_publish_year && !$('[name="publicationDate"]').value) {
+        $('[name="publicationDate"]').value = `${hit.first_publish_year}-01-01`;
+      }
+      if (hit.number_of_pages_median && !$('[name="pageCount"]').value) {
+        $('[name="pageCount"]').value = hit.number_of_pages_median;
+      }
+      toast('Cover added');
+    } catch (e) {
+      toast('Lookup failed');
+    } finally {
+      btn.innerHTML = 'Find cover from Open Library';
+      btn.disabled = false;
+    }
+  };
+
+  window._saveBook = async () => {
+    const form = $('#bookForm');
+    if (!form.reportValidity()) return;
+    const fd = new FormData(form);
+    const status = $('[data-status].on').dataset.status;
+    const medium = $('[data-medium].on').dataset.medium;
+    const updated = Object.assign({}, b, {
+      title: (fd.get('title') || '').trim(),
+      author: (fd.get('author') || '').trim(),
+      coverUrl: (fd.get('coverUrl') || '').trim() || null,
+      status,
+      medium,
+      dateRead: status === 'read' ? (fd.get('dateRead') || null) : null,
+      rating: status === 'read' ? (+window._getRating() || null) : null,
+      bookmarked: status === 'tbr' ? !!fd.get('bookmarked') : false,
+      pageCount: +(fd.get('pageCount') || 0) || null,
+      publicationDate: (fd.get('publicationDate') || null) || null,
+      location: (fd.get('location') || '').trim() || null,
+      genre: (fd.get('genre') || '').trim() || null,
+      notes: (fd.get('notes') || '').trim() || null,
+      quotes: ((qWrap._quotes) || []).map(q => q.trim()).filter(Boolean),
+    });
+    // geocode if location changed
+    const prev = getBook(b.id);
+    if (updated.location && (!prev || prev.location !== updated.location || prev.lat == null)) {
+      try {
+        const g = await geocode(updated.location);
+        if (g) { updated.lat = g.lat; updated.lng = g.lng; }
+      } catch {}
+    } else if (!updated.location) {
+      updated.lat = null; updated.lng = null;
+    }
+    upsertBook(updated);
+    toast('Saved');
+    location.hash = `#/book/${updated.id}`;
+  };
+}
+
+// ---------- geocoding (Nominatim) ----------
+async function geocode(q) {
+  if (!q) return null;
+  // small in-memory cache
+  geocode._cache = geocode._cache || JSON.parse(localStorage.getItem('lib.geo.v1') || '{}');
+  if (geocode._cache[q]) return geocode._cache[q];
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`;
+  const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  const j = await r.json();
+  if (!j || !j[0]) return null;
+  const out = { lat: +j[0].lat, lng: +j[0].lon };
+  geocode._cache[q] = out;
+  localStorage.setItem('lib.geo.v1', JSON.stringify(geocode._cache));
+  return out;
+}
+
+// ---------- stats ----------
+function viewStats() {
+  setHeader({ title: 'Stats' });
+  const read = State.books.filter(b => b.status === 'read' && b.dateRead).slice().sort((a, b) => a.dateRead.localeCompare(b.dateRead));
+  const thisYear = new Date().getFullYear();
+  const thisYearBooks = read.filter(b => b.dateRead.startsWith(String(thisYear)));
+
+  // books per year
+  const perYear = {};
+  read.forEach(b => { const y = b.dateRead.slice(0, 4); perYear[y] = (perYear[y] || 0) + 1; });
+  const years = Object.keys(perYear).sort();
+  const maxN = Math.max(0, ...Object.values(perYear));
+
+  // time per physical book (consecutive)
+  // assumption: physical books are read consecutively; time = days between previous physical read date and this one
+  const physical = read.filter(b => b.medium !== 'audio');
+  const times = [];
+  for (let i = 1; i < physical.length; i++) {
+    const a = new Date(physical[i - 1].dateRead);
+    const c = new Date(physical[i].dateRead);
+    const days = Math.max(1, Math.round((c - a) / 86400000));
+    times.push({ book: physical[i], days });
+  }
+  const recentTimes = times.slice(-12).reverse();
+  // avg pages/day across books with known pages
+  const withPages = times.filter(t => t.book.pageCount);
+  const avgDaysPerBook = times.length ? Math.round(times.reduce((s, t) => s + t.days, 0) / times.length) : null;
+  const avgPagesPerDay = withPages.length
+    ? Math.round(withPages.reduce((s, t) => s + t.book.pageCount / t.days, 0) / withPages.length)
+    : null;
+
+  $('#app').innerHTML = `
+    <div class="stat-hero">
+      <div class="n">${thisYearBooks.length}</div>
+      <div class="l">books read in ${thisYear}</div>
+    </div>
+
+    <div class="section-h">Books per year</div>
+    ${years.length ? `<div class="bar-chart">
+      ${years.map(y => `
+        <div class="bar-row">
+          <div>${y}</div>
+          <div class="bar"><div style="width:${(perYear[y]/maxN)*100}%"></div></div>
+          <div class="n">${perYear[y]}</div>
+        </div>`).join('')}
+    </div>` : `<div class="empty">No data yet.</div>`}
+
+    <div class="section-h">Reading pace <span style="text-transform:none;color:var(--text-mute)">(physical books only)</span></div>
+    <div class="meta-grid">
+      <div><div class="k">Avg days / book</div><div class="v">${avgDaysPerBook ?? '—'}</div></div>
+      <div><div class="k">Avg pages / day</div><div class="v">${avgPagesPerDay ?? '—'}</div></div>
+    </div>
+
+    <div class="section-h">Recent — time taken</div>
+    ${recentTimes.length ? `<ul class="read-list-mini">
+      ${recentTimes.map(t => `
+        <li onclick="location.hash='#/book/${attr(t.book.id)}'">
+          <div class="t">${esc(t.book.title)}</div>
+          <div class="d">${t.days}d${t.book.pageCount ? ` · ${Math.round(t.book.pageCount / t.days)} p/d` : ''}</div>
+        </li>`).join('')}
+    </ul>` : `<div class="empty">Need at least two consecutive physical reads.</div>`}
+  `;
+}
+
+// ---------- map ----------
+function viewMap() {
+  setHeader({ title: 'Map' });
+  $('#app').innerHTML = `<div id="map"></div>`;
+  if (typeof L === 'undefined') {
+    $('#app').innerHTML = `<div class="empty">Map library failed to load.</div>`;
+    return;
+  }
+  const map = L.map('map', { zoomControl: true, scrollWheelZoom: true }).setView([20, 0], 2);
+  window._map = map;
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+  const pts = State.books.filter(b => b.lat != null && b.lng != null);
+  const ungeocoded = State.books.filter(b => b.location && b.lat == null);
+  const group = L.featureGroup();
+  pts.forEach(b => {
+    const m = L.marker([b.lat, b.lng]);
+    m.bindPopup(`<strong>${esc(b.title)}</strong><br>${esc(b.author||'')}<br><a href="#/book/${attr(b.id)}">View →</a>`);
+    m.addTo(group);
+  });
+  group.addTo(map);
+  if (pts.length) map.fitBounds(group.getBounds().pad(0.2));
+
+  if (ungeocoded.length) {
+    const banner = document.createElement('div');
+    banner.style.cssText = 'position:absolute;top:8px;left:8px;right:8px;z-index:1000;background:var(--surface);padding:8px 12px;border:1px solid var(--line-strong);border-radius:6px;font-size:12px;display:flex;gap:8px;align-items:center;';
+    banner.innerHTML = `<span>${ungeocoded.length} book${ungeocoded.length>1?'s':''} need geocoding</span><button style="width:auto;padding:4px 10px;font-size:12px" id="geoAll">Geocode all</button>`;
+    $('#map').appendChild(banner);
+    $('#geoAll').onclick = async () => {
+      $('#geoAll').textContent = 'Working…';
+      $('#geoAll').disabled = true;
+      let ok = 0;
+      for (const b of ungeocoded) {
+        try {
+          const g = await geocode(b.location);
+          if (g) {
+            b.lat = g.lat; b.lng = g.lng; b.updatedAt = nowIso();
+            State.dirty = true;
+            ok++;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 1100)); // respect Nominatim rate limit
+      }
+      persist();
+      toast(`Geocoded ${ok}`);
+      route(); // re-render map
+    };
+  }
+}
+
+// ---------- settings ----------
+function viewSettings() {
+  setHeader({ title: 'Settings' });
+  const cfg = State.config;
+  const pat = getPat();
+  const masked = pat ? '•'.repeat(Math.min(20, pat.length)) : '';
+  $('#app').innerHTML = `
+    <div class="group">
+      <h3>GitHub Sync</h3>
+      <p>Push your books.json to a repo so it syncs across devices and lives in version control.</p>
+      <div class="row">
+        <div class="field"><label>Owner</label><input id="cfgOwner" value="${attr(cfg.owner||'')}" placeholder="your-username"></div>
+        <div class="field"><label>Repo</label><input id="cfgRepo" value="${attr(cfg.repo||'')}" placeholder="library"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Branch</label><input id="cfgBranch" value="${attr(cfg.branch||'main')}"></div>
+        <div class="field"><label>Path</label><input id="cfgPath" value="${attr(cfg.path||'books.json')}"></div>
+      </div>
+      <div class="field">
+        <label>Personal access token <span style="text-transform:none;color:var(--text-mute)">(fine-grained, with Contents: read & write on this repo)</span></label>
+        <input id="cfgPat" type="password" placeholder="${pat ? masked : 'ghp_...'}" autocomplete="off">
+        <div class="helper">Stored locally on this device only. Leave blank to keep existing.</div>
+      </div>
+      <div class="action-row">
+        <button onclick="window._saveCfg()">Save settings</button>
+        <button class="save-btn" onclick="window._sync()" id="syncBtn">
+          ${State.dirty ? 'Sync to GitHub (unsaved)' : 'Sync to GitHub'}
+        </button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Import / Export</h3>
+      <p>Download your library as JSON, or restore from a JSON file.</p>
+      <div class="action-row">
+        <button onclick="window._exportJson()">Export books.json</button>
+        <button onclick="document.getElementById('importFile').click()">Import JSON</button>
+        <input type="file" id="importFile" accept=".json,application/json" hidden onchange="window._importJson(event)">
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Kindle highlights</h3>
+      <p>Upload your <code>My Clippings.txt</code> from a Kindle. Highlights are matched to books by title and added as quotes.</p>
+      <input type="file" id="kindleFile" class="file-input" accept=".txt,text/plain">
+      <div class="helper">To export: plug your Kindle into a computer, open the device drive, copy <code>documents/My Clippings.txt</code>.</div>
+      <div id="kindlePreview" style="margin-top:10px"></div>
+    </div>
+
+    <div class="group">
+      <h3>Reset</h3>
+      <p>Reload books from the repo's books.json, discarding any local-only edits.</p>
+      <div class="action-row">
+        <button class="danger" onclick="window._resetLocal()">Discard local edits</button>
+      </div>
+    </div>
+
+    <div style="text-align:center;color:var(--text-mute);font-size:12px;padding:24px 0">
+      ${State.books.length} books · ${State.dirty ? 'unsaved changes' : 'in sync'}
+    </div>
+  `;
+  $('#kindleFile').onchange = window._kindleImport;
+}
+
+window._saveCfg = () => {
+  State.config.owner = $('#cfgOwner').value.trim();
+  State.config.repo = $('#cfgRepo').value.trim();
+  State.config.branch = $('#cfgBranch').value.trim() || 'main';
+  State.config.path = $('#cfgPath').value.trim() || 'books.json';
+  const newPat = $('#cfgPat').value.trim();
+  if (newPat) setPat(newPat);
+  saveConfig();
+  toast('Settings saved');
+};
+
+window._exportJson = () => {
+  const doc = { version: 1, updatedAt: nowIso(), books: State.books };
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'books.json'; a.click();
+  URL.revokeObjectURL(url);
+};
+
+window._importJson = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const doc = JSON.parse(r.result);
+      const incoming = doc.books || (Array.isArray(doc) ? doc : null);
+      if (!Array.isArray(incoming)) throw new Error('Invalid file');
+      if (!confirm(`Replace ${State.books.length} books with ${incoming.length} from file?`)) return;
+      State.books = incoming;
+      State.dirty = true;
+      persist();
+      toast('Imported');
+      route();
+    } catch (err) {
+      toast('Bad JSON');
+    }
+  };
+  r.readAsText(file);
+};
+
+window._resetLocal = async () => {
+  if (!confirm('Discard all local edits and reload from repo books.json?')) return;
+  localStorage.removeItem(STORE_KEY);
+  await loadBooks();
+  toast('Reloaded');
+  route();
+};
+
+// GitHub sync via Contents API
+window._sync = async () => {
+  const cfg = State.config;
+  const pat = getPat();
+  if (!cfg.owner || !cfg.repo) { toast('Set owner & repo first'); return; }
+  if (!pat) { toast('Add a personal access token first'); return; }
+  const btn = $('#syncBtn');
+  btn.innerHTML = '<span class="spin"></span> Syncing…';
+  btn.disabled = true;
+  try {
+    const api = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodeURIComponent(cfg.path)}`;
+    // get current SHA (if exists)
+    let sha = null;
+    const head = await fetch(`${api}?ref=${encodeURIComponent(cfg.branch)}`, {
+      headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json' }
+    });
+    if (head.status === 200) {
+      const meta = await head.json();
+      sha = meta.sha;
+    } else if (head.status !== 404) {
+      throw new Error(`HEAD ${head.status}`);
+    }
+    const doc = { version: 1, updatedAt: nowIso(), books: State.books };
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))));
+    const put = await fetch(api, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: `Update books.json (${State.books.length} books)`,
+        content,
+        branch: cfg.branch,
+        sha: sha || undefined,
+      }),
+    });
+    if (!put.ok) {
+      const t = await put.text();
+      throw new Error(`PUT ${put.status}: ${t.slice(0, 120)}`);
+    }
+    State.dirty = false;
+    persist();
+    toast('Synced to GitHub');
+    route();
+  } catch (e) {
+    console.error(e);
+    toast('Sync failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// Kindle My Clippings.txt parser
+// Format: each clipping is 5 lines, separated by ==========
+//   Title (Author)
+//   - Your Highlight on page X | Location ... | Added on ...
+//   <blank>
+//   Highlighted text
+//   ==========
+window._kindleImport = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = () => {
+    const items = parseClippings(r.result);
+    const grouped = {};
+    items.forEach(it => {
+      const key = normTitle(it.title);
+      if (!grouped[key]) grouped[key] = { title: it.title, author: it.author, quotes: [] };
+      if (it.kind === 'highlight' && it.text) grouped[key].quotes.push(it.text);
+    });
+    // match
+    const norm = s => normTitle(s);
+    const matches = Object.values(grouped).map(g => {
+      const match = State.books.find(b => norm(b.title) === norm(g.title));
+      return { ...g, match };
+    });
+    const preview = $('#kindlePreview');
+    preview.innerHTML = `
+      <div class="helper">Parsed ${items.length} clippings · ${matches.length} books · ${matches.filter(m=>m.match).length} matched in your library.</div>
+      <ul style="list-style:none;padding:0;margin:8px 0;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:var(--radius)">
+        ${matches.map((m, i) => `
+          <li style="padding:8px 10px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center">
+            <input type="checkbox" data-i="${i}" ${m.match ? 'checked' : ''} ${m.match ? '' : 'disabled'} style="width:auto">
+            <div style="flex:1;font-size:13px">
+              <div>${esc(m.title)} <span style="color:var(--text-mute)">${esc(m.author||'')}</span></div>
+              <div style="color:var(--text-mute);font-size:11px">${m.quotes.length} quote${m.quotes.length===1?'':'s'} · ${m.match ? 'matched' : 'no match'}</div>
+            </div>
+          </li>`).join('')}
+      </ul>
+      <button id="applyKindle">Add ${matches.filter(m=>m.match).length} matched as quotes</button>
+    `;
+    $('#applyKindle').onclick = () => {
+      let added = 0;
+      $$('#kindlePreview input:checked').forEach(cb => {
+        const m = matches[+cb.dataset.i];
+        if (!m.match) return;
+        const b = getBook(m.match.id);
+        const existing = new Set((b.quotes || []).map(q => q.trim()));
+        m.quotes.forEach(q => { if (!existing.has(q.trim())) { b.quotes = (b.quotes || []).concat([q]); existing.add(q.trim()); added++; } });
+        upsertBook(b);
+      });
+      toast(`Added ${added} quotes`);
+      route();
+    };
+  };
+  r.readAsText(file);
+};
+
+function parseClippings(txt) {
+  // Strip BOM
+  if (txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);
+  const blocks = txt.split(/\r?\n=+\r?\n/);
+  const out = [];
+  for (const raw of blocks) {
+    const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (lines.length < 2) continue;
+    const header = lines[0];
+    const meta = lines[1];
+    const text = lines.slice(2).join('\n').trim();
+    // Title (Author) — author in trailing parens
+    let title = header, author = '';
+    const am = header.match(/^(.*)\s+\(([^)]+)\)\s*$/);
+    if (am) { title = am[1].trim(); author = am[2].trim(); }
+    let kind = 'highlight';
+    if (/Bookmark/i.test(meta)) kind = 'bookmark';
+    else if (/Note/i.test(meta)) kind = 'note';
+    out.push({ title, author, kind, text });
+  }
+  return out;
+}
+function normTitle(s) {
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '').trim();
+}
+
+// ---------- bootstrap ----------
+(async () => {
+  await loadBooks();
+  if (!location.hash) location.hash = '#/';
+  route();
+})();
+
+})();
