@@ -80,36 +80,48 @@ function setPat(v) { v ? localStorage.setItem(PAT_KEY, v) : localStorage.removeI
 async function loadBooks() {
   loadConfig();
   loadPrefs();
-  // localStorage has working copy; books.json in repo is the source of truth on first load
-  const local = localStorage.getItem(STORE_KEY);
-  if (local) {
-    try {
-      const doc = JSON.parse(local);
-      State.books = doc.books || [];
-      State.challenges = doc.challenges;
-      State.dirty = !!doc.dirty;
-      seedDefaultsIfNeeded();
-      State.loaded = true;
-      return;
-    } catch {}
-  }
-  // First load from books.json shipped in repo
+
+  // Read working copy from localStorage
+  let local = null;
+  try {
+    const s = localStorage.getItem(STORE_KEY);
+    if (s) local = JSON.parse(s);
+  } catch {}
+
+  // Always try to fetch the source-of-truth from the repo too, so we can
+  // pick up edits made on another device. If we're offline, we just use local.
+  let remote = null;
   try {
     const r = await fetch('books.json', { cache: 'no-store' });
-    if (r.ok) {
-      const doc = await r.json();
-      State.books = doc.books || [];
-      State.challenges = doc.challenges;
-      State.dirty = false;
-      seedDefaultsIfNeeded();
-      persist();
-      State.loaded = true;
-      return;
-    }
+    if (r.ok) remote = await r.json();
   } catch {}
-  State.books = [];
-  State.challenges = DEFAULT_CHALLENGES.slice();
+
+  let chosen;
+  if (local && remote) {
+    if (local.dirty) {
+      // local has unpushed edits — keep them, don't blow them away with remote
+      chosen = local;
+    } else {
+      // both clean: prefer whichever updatedAt is newer
+      const lt = local.updatedAt || '';
+      const rt = remote.updatedAt || '';
+      chosen = lt >= rt ? local : remote;
+    }
+  } else {
+    chosen = local || remote || { books: [], challenges: DEFAULT_CHALLENGES.slice() };
+  }
+
+  State.books = chosen.books || [];
+  State.challenges = chosen.challenges;
+  State.dirty = !!(local && local.dirty && chosen === local);
+  seedDefaultsIfNeeded();
+  persist();
   State.loaded = true;
+
+  // If we replaced local with a newer remote, no further action needed.
+  // If local was dirty and an auto-sync is possible, kick one off so unpushed
+  // edits from a previous session get pushed now that we're back online.
+  if (State.dirty) scheduleAutoSync(500);
 }
 
 function seedDefaultsIfNeeded() {
@@ -132,11 +144,13 @@ function upsertBook(book) {
   if (i >= 0) State.books[i] = book; else State.books.unshift(book);
   State.dirty = true;
   persist();
+  scheduleAutoSync();
 }
 function deleteBook(id) {
   State.books = State.books.filter(b => b.id !== id);
   State.dirty = true;
   persist();
+  scheduleAutoSync();
 }
 function getBook(id) { return State.books.find(b => b.id === id); }
 
@@ -834,6 +848,7 @@ function viewMap() {
         await new Promise(r => setTimeout(r, 1100)); // respect Nominatim rate limit
       }
       persist();
+      scheduleAutoSync();
       toast(`Geocoded ${ok}`);
       route(); // re-render map
     };
@@ -1045,6 +1060,7 @@ window._saveChallenge = () => {
   if (i >= 0) State.challenges[i] = updated; else State.challenges.push(updated);
   State.dirty = true;
   persist();
+  scheduleAutoSync();
   toast('Saved');
   location.hash = '#/challenges';
 };
@@ -1053,6 +1069,7 @@ window._delChallenge = (id) => {
   State.challenges = (State.challenges || []).filter(c => c.id !== id);
   State.dirty = true;
   persist();
+  scheduleAutoSync();
   toast('Deleted');
   location.hash = '#/challenges';
 };
@@ -1172,7 +1189,74 @@ window._resetLocal = async () => {
   route();
 };
 
-// GitHub sync via Contents API
+// GitHub sync core (reusable for manual + auto)
+async function pushToGitHub() {
+  const cfg = State.config;
+  const pat = getPat();
+  if (!cfg.owner || !cfg.repo) throw new Error('Repo not configured');
+  if (!pat) throw new Error('No PAT configured');
+  const api = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodeURIComponent(cfg.path)}`;
+  let sha = null;
+  const head = await fetch(`${api}?ref=${encodeURIComponent(cfg.branch)}`, {
+    headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json' }
+  });
+  if (head.status === 200) {
+    sha = (await head.json()).sha;
+  } else if (head.status !== 404) {
+    throw new Error(`HEAD ${head.status}`);
+  }
+  const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
+  const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))));
+  const put = await fetch(api, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: `Update books.json (${State.books.length} books)`,
+      content,
+      branch: cfg.branch,
+      sha: sha || undefined,
+    }),
+  });
+  if (!put.ok) {
+    const t = await put.text();
+    throw new Error(`PUT ${put.status}: ${t.slice(0, 120)}`);
+  }
+  State.dirty = false;
+  persist();
+}
+
+// Auto-sync: debounced, single-flight, silent on success
+let _syncTimer = null;
+let _syncing = false;
+let _syncAgain = false;
+function scheduleAutoSync(delayMs = 2500) {
+  if (!getPat()) return;                // not configured
+  if (!State.config.owner || !State.config.repo) return;
+  if (!navigator.onLine) return;
+  if (_syncTimer) clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(autoSync, delayMs);
+}
+async function autoSync() {
+  if (!State.dirty) return;
+  if (_syncing) { _syncAgain = true; return; }
+  _syncing = true;
+  try {
+    await pushToGitHub();
+    // re-render any visible sync indicator (library footer, settings)
+    const hash = location.hash || '#/';
+    if (hash === '#/' || hash === '#/settings') route();
+  } catch (e) {
+    console.warn('Auto-sync failed', e);
+    toast('Auto-sync failed: ' + e.message, 3000);
+  } finally {
+    _syncing = false;
+    if (_syncAgain) { _syncAgain = false; setTimeout(autoSync, 800); }
+  }
+}
+// Retry queued sync when the device comes back online
+window.addEventListener('online', () => { if (State.dirty) scheduleAutoSync(500); });
+
+// Manual sync button — same core, with UI feedback
 window._sync = async () => {
   const cfg = State.config;
   const pat = getPat();
@@ -1182,41 +1266,12 @@ window._sync = async () => {
   btn.innerHTML = '<span class="spin"></span> Syncing…';
   btn.disabled = true;
   try {
-    const api = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodeURIComponent(cfg.path)}`;
-    // get current SHA (if exists)
-    let sha = null;
-    const head = await fetch(`${api}?ref=${encodeURIComponent(cfg.branch)}`, {
-      headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json' }
-    });
-    if (head.status === 200) {
-      const meta = await head.json();
-      sha = meta.sha;
-    } else if (head.status !== 404) {
-      throw new Error(`HEAD ${head.status}`);
-    }
-    const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
-    const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))));
-    const put = await fetch(api, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: `Update books.json (${State.books.length} books)`,
-        content,
-        branch: cfg.branch,
-        sha: sha || undefined,
-      }),
-    });
-    if (!put.ok) {
-      const t = await put.text();
-      throw new Error(`PUT ${put.status}: ${t.slice(0, 120)}`);
-    }
-    State.dirty = false;
-    persist();
+    await pushToGitHub();
     toast('Synced to GitHub');
     route();
   } catch (e) {
     console.error(e);
-    toast('Sync failed: ' + e.message);
+    toast('Sync failed: ' + e.message, 3000);
   } finally {
     btn.disabled = false;
   }

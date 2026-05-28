@@ -378,6 +378,13 @@
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW registration failed', err));
     });
+    // When a new SW takes over, reload once so the page picks up the new code.
+    let _reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (_reloaded) return;
+      _reloaded = true;
+      location.reload();
+    });
   }
 </script>
 

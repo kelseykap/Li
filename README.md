@@ -30,9 +30,9 @@ The placeholder icon is a simple "L" — swap out `icon-192.png`, `icon-512.png`
 
 ## Edit on phone, save to GitHub
 
-The app uses your browser's local storage as a working copy. When you want to commit changes back to the repo, use **Settings → Sync to GitHub**.
+Once you set up GitHub sync, **every edit you make auto-pushes to the repo** about 2 seconds after you save. Rapid edits batch into one commit. This means your library is always backed up — even if you clear your browser data, your books survive in the repo.
 
-To set that up once:
+To set it up once:
 
 1. Create a [fine-grained personal access token](https://github.com/settings/tokens?type=beta):
    - **Repository access**: only this repo
@@ -43,9 +43,15 @@ To set that up once:
    - Branch (usually `main`)
    - Path (`books.json` if you keep the default)
    - Token (paste it — stored only on this device's local storage)
-3. Hit **Sync to GitHub**. From then on, the **Sync** button pushes a commit to `books.json`.
+3. Hit **Save settings**. From now on, edits auto-sync. The manual **Sync to GitHub** button still works if you want to force a push.
 
-A header note ("Unsaved changes · sync to GitHub") reminds you when local edits haven't been pushed.
+The "Unsaved changes" footer on the Library tab tells you when edits haven't been pushed yet (it'll clear within a couple seconds of saving when auto-sync runs). If auto-sync fails (e.g. offline or PAT expired), you'll see a toast and the dirty flag stays until you're back online or fix the issue — then it retries automatically.
+
+**Multi-device:** when you open the app on another device, it fetches the latest `books.json` from the repo and uses that if it's newer than the local copy. Your edits sync across devices via GitHub automatically.
+
+## Getting code updates
+
+You **shouldn't ever need to clear site data** to get new features. The service worker uses a network-first strategy — every time you open the app while online, it checks for fresh code and uses the new version immediately. The cache is only there as an offline fallback. When a new version is detected, the page auto-reloads once so you're on the latest build.
 
 ## Importing Kindle highlights
 
