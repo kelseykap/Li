@@ -130,12 +130,27 @@
     background: transparent; width: auto;
   }
   .pill.on { background: var(--text); color: var(--bg); border-color: var(--text); }
-  .search-row { display: flex; gap: 8px; padding-bottom: 8px; }
-  .search-row input { flex: 1; min-width: 0; }
-  .search-row select { width: auto; }
-  .search-row .icon-btn { width: 36px; height: 36px; flex: 0 0 36px; border: 1px solid var(--line-strong); border-radius: var(--radius); }
+  .search-row {
+    display: flex; gap: 6px; padding-bottom: 8px; align-items: center;
+  }
+  .search-row > * { height: 38px; }
+  .search-row input, .search-row select {
+    flex: 1; min-width: 0;
+    padding: 0 12px;
+    border-radius: var(--radius);
+  }
+  .search-row select { padding-right: 28px; }
+  .search-row .icon-btn {
+    width: 38px; flex: 0 0 38px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  }
   .search-row .icon-btn.on { background: var(--text); color: var(--bg); border-color: var(--text); }
-  .search-row .icon-btn svg { width: 16px; height: 16px; }
+  .search-row .icon-btn.active-state { border-color: var(--accent); color: var(--accent); }
+  .search-row .icon-btn svg { width: 18px; height: 18px; }
+  .search-row .spacer { flex: 1; }
 
   /* book list */
   .book-list { list-style: none; padding: 0; margin: 0; }
@@ -215,8 +230,9 @@
   .ch-list { list-style: none; padding: 0; margin: 4px 0 0; max-height: 180px; overflow-y: auto; }
   .ch-list li { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; padding: 5px 0; font-size: 13px; align-items: baseline; border-bottom: 1px solid var(--line); }
   .ch-list li:last-child { border-bottom: 0; }
-  .ch-list .mark { color: var(--accent); }
+  .ch-list .mark { color: var(--accent); width: 16px; text-align: center; }
   .ch-list .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ch-list .title.done { color: var(--text-mute); text-decoration: line-through; }
   .ch-list .sub { color: var(--text-mute); font-size: 11px; }
   .ch-menu-btn { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: var(--text-mute); font-size: 18px; line-height: 1; }
   .ch-status-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; background: var(--line); color: var(--text-soft); margin-left: 4px; }

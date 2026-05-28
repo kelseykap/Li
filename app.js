@@ -195,6 +195,19 @@ function route() {
 }
 window.addEventListener('hashchange', route);
 
+// Force re-render when tapping the active nav tab (hashchange won't fire if hash is unchanged).
+// This makes sure Stats etc. always reflect the latest State.books after edits.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('.nav a');
+  if (!a) return;
+  const target = a.getAttribute('href');
+  const current = location.hash || '#/';
+  if (target === current) {
+    // Same tab tap: explicitly re-render after the click resolves
+    requestAnimationFrame(() => route());
+  }
+});
+
 // ---------- views ----------
 function renderRating(r, big = false) {
   let html = `<span class="rating-dots ${big ? 'accent' : ''}">`;
@@ -209,31 +222,59 @@ function coverHtml(b, size = 'small') {
   return `<div class="cover-placeholder ${size==='big'?'big':''}">${esc((b.title || '?')[0] || '?')}</div>`;
 }
 
+// Library toolbar state: idle | search | sort (collapses by default to reduce clutter)
+State.tool = State.tool || 'idle';
+
 function viewLibrary() {
   setHeader({
     title: 'Library',
     right: `<a href="#/add" class="icon-btn" aria-label="Add book"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>`
   });
-  const app = $('#app');
-  const filtered = applyFilter(State.books);
+  $('#app').innerHTML = `
+    <div class="filters" id="filtersRow"></div>
+    <div class="search-row" id="toolbar"></div>
+    <div id="bookListWrap"></div>
+    <div id="dirtyNote"></div>
+  `;
+  renderFilters();
+  renderToolbar();
+  renderBookList();
+  renderDirtyNote();
+}
+
+function renderFilters() {
   const counts = {
     all: State.books.length,
     read: State.books.filter(b => b.status === 'read').length,
     tbr: State.books.filter(b => b.status === 'tbr').length,
     bookmarked: State.books.filter(b => b.bookmarked).length,
   };
+  $('#filtersRow').innerHTML = ['all','read','tbr','bookmarked'].map(f => `
+    <button class="pill ${State.filter===f?'on':''}" data-f="${f}">
+      ${f === 'all' ? 'All' : f === 'read' ? 'Read' : f === 'tbr' ? 'TBR' : 'Bookmarked'}
+      <span style="opacity:0.55"> ${counts[f]}</span>
+    </button>`).join('');
+  $$('#filtersRow .pill').forEach(p => p.onclick = () => {
+    State.filter = p.dataset.f; savePrefs(); renderFilters(); renderBookList();
+  });
+}
+
+function renderToolbar() {
   const isGrid = State.view === 'grid';
-  app.innerHTML = `
-    <div class="filters">
-      ${['all','read','tbr','bookmarked'].map(f => `
-        <button class="pill ${State.filter===f?'on':''}" data-f="${f}">
-          ${f === 'all' ? 'All' : f === 'read' ? 'Read' : f === 'tbr' ? 'TBR' : 'Bookmarked'}
-          <span style="opacity:0.55"> ${counts[f]}</span>
-        </button>`).join('')}
-    </div>
-    <div class="search-row">
-      <input type="search" placeholder="Search title or author" value="${attr(State.search)}" id="search">
-      <select id="sort">
+  const searchActive = !!State.search;
+  const sortActive = State.sort !== 'recent' || State.sortDir !== 'desc';
+  const tool = State.tool;
+  let html = '';
+
+  if (tool === 'search') {
+    html = `
+      <input type="search" id="search" placeholder="Search title or author" value="${attr(State.search)}" autocomplete="off">
+      <button class="icon-btn" id="closeTool" aria-label="Close search">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>`;
+  } else if (tool === 'sort') {
+    html = `
+      <select id="sort" style="flex:1">
         ${[
           ['recent','Recent'],
           ['title','Title'],
@@ -242,29 +283,80 @@ function viewLibrary() {
           ['date','Date read'],
         ].map(([v,l]) => `<option value="${v}" ${State.sort===v?'selected':''}>${l}</option>`).join('')}
       </select>
-      <button class="icon-btn" id="dirBtn" aria-label="Sort direction" title="${State.sortDir==='desc'?'Descending — tap for ascending':'Ascending — tap for descending'}">
+      <button class="icon-btn" id="dirBtn" aria-label="Sort direction">
         ${State.sortDir==='desc'
           ? '<svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg>'
           : '<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>'}
       </button>
-      <button class="icon-btn ${isGrid?'on':''}" id="viewBtn" aria-label="${isGrid?'List view':'Grid view'}" title="${isGrid?'List view':'Grid view'}">
+      <button class="icon-btn" id="closeTool" aria-label="Close sort">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>`;
+  } else {
+    // idle — small icon buttons
+    html = `
+      <button class="icon-btn ${searchActive?'active-state':''}" id="openSearch" aria-label="Search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      </button>
+      <button class="icon-btn ${sortActive?'active-state':''}" id="openSort" aria-label="Sort">
+        <svg viewBox="0 0 24 24"><path d="M3 7h18M6 12h12M10 17h4"/></svg>
+      </button>
+      <span class="spacer"></span>
+      <button class="icon-btn ${isGrid?'on':''}" id="viewBtn" aria-label="${isGrid?'List view':'Grid view'}">
         ${isGrid
           ? '<svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>'
           : '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>'}
-      </button>
-    </div>
-    ${filtered.length === 0
-      ? `<div class="empty">${State.search ? 'No matches.' : 'No books yet. Tap + to add one.'}</div>`
-      : isGrid
-        ? `<div class="book-grid">${filtered.map(bookCard).join('')}</div>`
-        : `<ul class="book-list">${filtered.map(bookRow).join('')}</ul>`}
-    ${State.dirty ? `<div class="empty" style="font-size:12px;padding:24px 0 0">Unsaved changes · <a href="#/settings" style="text-decoration:underline">sync to GitHub</a></div>` : ''}
-  `;
-  $$('.pill').forEach(p => p.onclick = () => { State.filter = p.dataset.f; savePrefs(); viewLibrary(); });
-  $('#search').oninput = debounce(e => { State.search = e.target.value; viewLibrary(); }, 150);
-  $('#sort').onchange = e => { State.sort = e.target.value; savePrefs(); viewLibrary(); };
-  $('#dirBtn').onclick = () => { State.sortDir = State.sortDir === 'desc' ? 'asc' : 'desc'; savePrefs(); viewLibrary(); };
-  $('#viewBtn').onclick = () => { State.view = isGrid ? 'list' : 'grid'; savePrefs(); viewLibrary(); };
+      </button>`;
+  }
+  $('#toolbar').innerHTML = html;
+
+  // bindings
+  if (tool === 'search') {
+    const input = $('#search');
+    input.focus();
+    // place cursor at end without blur
+    const v = input.value;
+    input.setSelectionRange(v.length, v.length);
+    input.oninput = debounce(e => {
+      State.search = e.target.value;
+      renderBookList();
+    }, 150);
+    $('#closeTool').onclick = () => {
+      State.search = '';
+      State.tool = 'idle';
+      renderToolbar();
+      renderBookList();
+    };
+  } else if (tool === 'sort') {
+    $('#sort').onchange = e => { State.sort = e.target.value; savePrefs(); renderBookList(); };
+    $('#dirBtn').onclick = () => {
+      State.sortDir = State.sortDir === 'desc' ? 'asc' : 'desc';
+      savePrefs();
+      renderToolbar();
+      renderBookList();
+    };
+    $('#closeTool').onclick = () => { State.tool = 'idle'; renderToolbar(); };
+  } else {
+    $('#openSearch').onclick = () => { State.tool = 'search'; renderToolbar(); };
+    $('#openSort').onclick = () => { State.tool = 'sort'; renderToolbar(); };
+    $('#viewBtn').onclick = () => { State.view = isGrid ? 'list' : 'grid'; savePrefs(); renderToolbar(); renderBookList(); };
+  }
+}
+
+function renderBookList() {
+  const filtered = applyFilter(State.books);
+  const isGrid = State.view === 'grid';
+  const html = filtered.length === 0
+    ? `<div class="empty">${State.search ? 'No matches.' : 'No books yet. Tap + to add one.'}</div>`
+    : isGrid
+      ? `<div class="book-grid">${filtered.map(bookCard).join('')}</div>`
+      : `<ul class="book-list">${filtered.map(bookRow).join('')}</ul>`;
+  $('#bookListWrap').innerHTML = html;
+}
+
+function renderDirtyNote() {
+  $('#dirtyNote').innerHTML = State.dirty
+    ? `<div class="empty" style="font-size:12px;padding:24px 0 0">Unsaved changes · <a href="#/settings" style="text-decoration:underline">sync to GitHub</a></div>`
+    : '';
 }
 
 function bookCard(b) {
@@ -350,7 +442,14 @@ function viewDetail(id) {
   setHeader({
     title: '',
     back: true,
-    right: `<button class="icon-btn" onclick="location.hash='#/book/${attr(b.id)}/edit'" aria-label="Edit"><svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>`
+    right: `
+      <button class="icon-btn" onclick="window._toggleBookmark('${attr(b.id)}')" aria-label="${b.bookmarked?'Remove bookmark':'Bookmark'}">
+        ${b.bookmarked
+          ? '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-3.5L6 21z"/></svg>'
+          : '<svg viewBox="0 0 24 24"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-3.5L6 21z"/></svg>'}
+      </button>
+      <button class="icon-btn" onclick="location.hash='#/book/${attr(b.id)}/edit'" aria-label="Edit"><svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
+    `
   });
   const meta = [];
   if (b.dateRead) meta.push(['Date read', fmtDate(b.dateRead)]);
@@ -375,6 +474,14 @@ function viewDetail(id) {
     </div>`;
 }
 window._del = (id) => { deleteBook(id); toast('Deleted'); location.hash = '#/'; };
+window._toggleBookmark = (id) => {
+  const b = getBook(id);
+  if (!b) return;
+  b.bookmarked = !b.bookmarked;
+  upsertBook(b);
+  toast(b.bookmarked ? 'Bookmarked' : 'Bookmark removed');
+  route();
+};
 
 function viewEdit(id) {
   const isNew = !id;
@@ -401,8 +508,8 @@ function viewEdit(id) {
         <div class="field">
           <label>Status</label>
           <div class="seg">
-            <button type="button" data-status="read" class="${b.status==='read'?'on':''}">Read</button>
             <button type="button" data-status="tbr" class="${b.status==='tbr'?'on':''}">TBR</button>
+            <button type="button" data-status="read" class="${b.status==='read'?'on':''}">Read</button>
           </div>
         </div>
         <div class="field">
@@ -436,14 +543,6 @@ function viewEdit(id) {
             ${[1,2,3,4].map(n => `<button type="button" class="dot ${(b.rating||0)>=n?'on':''}" data-r="${n}" aria-label="${n}"></button>`).join('')}
             <span class="label" id="ratingLabel">${b.rating ? RATING_LABELS[b.rating] : ''}</span>
           </div>
-        </div>
-      </div>
-      <div id="tbrFields" style="${b.status==='tbr'?'':'display:none'}">
-        <div class="field">
-          <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0">
-            <input type="checkbox" name="bookmarked" ${b.bookmarked?'checked':''} style="width:auto">
-            <span>Bookmark (prioritise)</span>
-          </label>
         </div>
       </div>
       <div class="row">
@@ -486,7 +585,6 @@ function viewEdit(id) {
     btn.classList.add('on');
     const isRead = btn.dataset.status === 'read';
     $('#readFields').style.display = isRead ? '' : 'none';
-    $('#tbrFields').style.display = isRead ? 'none' : '';
   });
   $$('[data-medium]').forEach(btn => btn.onclick = () => {
     $$('[data-medium]').forEach(x => x.classList.remove('on'));
@@ -608,7 +706,7 @@ function viewEdit(id) {
       medium,
       dateRead: status === 'read' ? (fd.get('dateRead') || null) : null,
       rating: status === 'read' ? (+window._getRating() || null) : null,
-      bookmarked: status === 'tbr' ? !!fd.get('bookmarked') : false,
+      // bookmarked is preserved from existing book via Object.assign; toggled from detail header
       pageCount: +(fd.get('pageCount') || 0) || null,
       publicationDate: (fd.get('publicationDate') || null) || null,
       location: (fd.get('location') || '').trim() || null,
@@ -876,6 +974,15 @@ function extractCountry(loc) {
 function challengeProgress(ch) {
   const books = State.books;
   switch (ch.type) {
+    case 'checklist': {
+      const items = (ch.items || []).map(it => {
+        const match = books.find(b => normTitle(b.title) === normTitle(it.text));
+        const done = match ? match.status === 'read' : !!it.done;
+        return { text: it.text || '', done, match };
+      });
+      const done = items.filter(it => it.done).length;
+      return { done, total: items.length, items };
+    }
     case 'alphabet': {
       const read = books.filter(b => b.status === 'read');
       const letters = {};
@@ -940,6 +1047,18 @@ function challengeCard(ch) {
   const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
   let body = '';
   switch (ch.type) {
+    case 'checklist':
+      body = p.items.length
+        ? `<ul class="ch-list">
+            ${p.items.map((it, i) => `
+              <li>
+                <span class="mark" onclick="event.stopPropagation();window._toggleChecklistItem('${attr(ch.id)}', ${i})" style="cursor:pointer">${it.done ? '✓' : '○'}</span>
+                <span class="title ${it.done?'done':''}" ${it.match ? `onclick="event.stopPropagation();location.hash='#/book/${attr(it.match.id)}'" style="cursor:pointer"` : ''}>${esc(it.text)}</span>
+                ${it.match ? `<span class="ch-status-pill ${it.match.status==='read'?'read':''}">${it.match.status==='read'?'read':'tbr'}</span>` : '<span></span>'}
+              </li>`).join('')}
+          </ul>`
+        : `<div class="helper">Tap ⋯ to add items.</div>`;
+      break;
     case 'alphabet':
       body = `
         <div class="alpha-grid">
@@ -976,7 +1095,7 @@ function challengeCard(ch) {
   }
   const progressText = ch.type === 'country' || ch.type === 'author' || ch.type === 'genre'
     ? `${p.done}${p.total ? ' / ' + p.total : ''}`
-    : `${p.done} / ${p.total}`;
+    : p.total === 0 ? '0' : `${p.done} / ${p.total}`;
   return `
     <div class="ch-card">
       <button class="ch-menu-btn" onclick="location.hash='#/challenge/${attr(ch.id)}/edit'" aria-label="Edit challenge">⋯</button>
@@ -993,8 +1112,8 @@ function challengeCard(ch) {
 function viewChallengeEdit(id) {
   const isNew = !id;
   const ch = isNew
-    ? { id: 'ch_' + uid(), type: 'alphabet', name: '', description: '', target: '' }
-    : Object.assign({}, (State.challenges || []).find(c => c.id === id));
+    ? { id: 'ch_' + uid(), type: 'checklist', name: '', description: '', target: '', items: [] }
+    : Object.assign({ items: [] }, (State.challenges || []).find(c => c.id === id));
   if (!isNew && !ch.id) { $('#app').innerHTML = `<div class="empty">Not found</div>`; return; }
   setHeader({
     title: isNew ? 'New challenge' : 'Edit challenge',
@@ -1006,6 +1125,7 @@ function viewChallengeEdit(id) {
       <div class="field">
         <label>Type</label>
         <select name="type" id="chType">
+          <option value="checklist" ${ch.type==='checklist'?'selected':''}>Checklist — your own items, tick off manually</option>
           <option value="alphabet" ${ch.type==='alphabet'?'selected':''}>Alphabet — one book per letter</option>
           <option value="country" ${ch.type==='country'?'selected':''}>Country — books by country</option>
           <option value="author" ${ch.type==='author'?'selected':''}>Author — all books by an author</option>
@@ -1014,11 +1134,15 @@ function viewChallengeEdit(id) {
       </div>
       <div class="field">
         <label>Name</label>
-        <input name="name" value="${attr(ch.name)}" placeholder="e.g. Read the alphabet" required>
+        <input name="name" value="${attr(ch.name)}" placeholder="e.g. Booker shortlist 2024" required>
       </div>
       <div class="field" id="targetField" style="${(ch.type==='author'||ch.type==='genre')?'':'display:none'}">
         <label>Target <span style="text-transform:none;color:var(--text-mute)" id="targetHint">(author name)</span></label>
         <input name="target" value="${attr(ch.target||'')}" placeholder="e.g. Margaret Atwood">
+      </div>
+      <div class="field" id="itemsField" style="${ch.type==='checklist'?'':'display:none'}">
+        <label>Items <span style="text-transform:none;color:var(--text-mute)">(one per line — titles auto-link to your library)</span></label>
+        <textarea name="items" id="itemsTa" rows="8" placeholder="e.g.&#10;The Safekeep&#10;Orbital&#10;James">${esc((ch.items||[]).map(it => it.text).join('\n'))}</textarea>
       </div>
       <div class="field">
         <label>Description</label>
@@ -1032,8 +1156,8 @@ function viewChallengeEdit(id) {
   `;
   $('#chType').onchange = e => {
     const t = e.target.value;
-    const showTarget = t === 'author' || t === 'genre';
-    $('#targetField').style.display = showTarget ? '' : 'none';
+    $('#targetField').style.display = (t === 'author' || t === 'genre') ? '' : 'none';
+    $('#itemsField').style.display = t === 'checklist' ? '' : 'none';
     $('#targetHint').textContent = t === 'author' ? '(author name)' : '(genre name — substring match)';
   };
 }
@@ -1042,19 +1166,29 @@ window._saveChallenge = () => {
   const form = $('#chForm');
   if (!form.reportValidity()) return;
   const fd = new FormData(form);
-  const id = (State.challenges || []).find(c => c.name && c.name === fd.get('name'))?.id;
   // figure out id from URL hash if editing
   const m = location.hash.match(/^#\/challenge\/([^/]+)\/edit$/);
   const editId = m ? m[1] : null;
   const finalId = editId || 'ch_' + uid();
+  const type = fd.get('type');
   const updated = {
     id: finalId,
-    type: fd.get('type'),
+    type,
     name: (fd.get('name') || '').trim(),
     description: (fd.get('description') || '').trim() || null,
   };
   const target = (fd.get('target') || '').trim();
   if (target) updated.target = target;
+  if (type === 'checklist') {
+    // Preserve done state for items that still exist (match by text)
+    const existing = (State.challenges || []).find(c => c.id === finalId);
+    const oldItems = existing && existing.items ? existing.items : [];
+    const newTexts = (fd.get('items') || '').split('\n').map(s => s.trim()).filter(Boolean);
+    updated.items = newTexts.map(text => {
+      const prior = oldItems.find(it => (it.text || '').trim() === text);
+      return { text, done: prior ? !!prior.done : false };
+    });
+  }
   if (!State.challenges) State.challenges = [];
   const i = State.challenges.findIndex(c => c.id === finalId);
   if (i >= 0) State.challenges[i] = updated; else State.challenges.push(updated);
@@ -1063,6 +1197,23 @@ window._saveChallenge = () => {
   scheduleAutoSync();
   toast('Saved');
   location.hash = '#/challenges';
+};
+
+window._toggleChecklistItem = (chId, idx) => {
+  const ch = (State.challenges || []).find(c => c.id === chId);
+  if (!ch || !ch.items || !ch.items[idx]) return;
+  const item = ch.items[idx];
+  // If this item is auto-linked to a book in the library, don't override — show toast
+  const match = State.books.find(b => normTitle(b.title) === normTitle(item.text));
+  if (match) {
+    toast(`"${item.text}" auto-tracks your library — change the book's status to mark complete`);
+    return;
+  }
+  item.done = !item.done;
+  State.dirty = true;
+  persist();
+  scheduleAutoSync();
+  if (location.hash === '#/challenges') route();
 };
 
 window._delChallenge = (id) => {
