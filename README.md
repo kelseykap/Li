@@ -22,7 +22,11 @@ python3 -m http.server 8000
 2. In the repo, go to **Settings → Pages**.
 3. Source: **Deploy from branch**, branch: `main`, folder: `/ (root)`. Save.
 4. After a minute, your app is live at `https://<your-username>.github.io/<repo>/`.
-5. Add it to your phone home screen (Safari: Share → Add to Home Screen) for an app-like feel.
+5. Install it on your phone for a full-screen, app-like experience:
+   - **Android Chrome**: open the URL, then tap the ⋮ menu → **Install app** (or **Add to home screen**). If you don't see "Install app", visit the site once, navigate around, then re-open the menu — Chrome sometimes waits for engagement before offering install.
+   - **iPhone Safari**: open the URL, tap Share → **Add to Home Screen**.
+
+The placeholder icon is a simple "L" — swap out `icon-192.png`, `icon-512.png`, `icon-192-maskable.png`, `icon-512-maskable.png`, and `apple-touch-icon.png` whenever you've got your real artwork.
 
 ## Edit on phone, save to GitHub
 
