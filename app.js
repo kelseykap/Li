@@ -303,10 +303,11 @@ function viewEdit(id) {
           <div id="coverPrev">${coverHtml(b)}</div>
           <div class="col">
             <input name="coverUrl" id="coverUrl" value="${attr(b.coverUrl||'')}" placeholder="https://...">
-            <button type="button" onclick="window._fetchCover()" id="fetchBtn">Find cover from Open Library</button>
+            <button type="button" onclick="window._findCovers()" id="fetchBtn">Find covers</button>
             <div class="helper">Or paste any image URL above.</div>
           </div>
         </div>
+        <div id="coverPicker" style="display:none;margin-top:12px"></div>
       </div>
       <div class="row">
         <div class="field">
@@ -439,7 +440,7 @@ function viewEdit(id) {
   function getRating() { return $('#ratingPick').dataset.value || null; }
   window._getRating = getRating;
 
-  window._fetchCover = async () => {
+  window._findCovers = async () => {
     const t = $('[name="title"]').value.trim();
     const a = $('[name="author"]').value.trim();
     if (!t) { toast('Add a title first'); return; }
@@ -447,28 +448,50 @@ function viewEdit(id) {
     btn.innerHTML = '<span class="spin"></span> Searching…';
     btn.disabled = true;
     try {
-      const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(t)}${a ? '&author=' + encodeURIComponent(a) : ''}&limit=5`;
-      const r = await fetch(url);
-      const j = await r.json();
-      const hit = (j.docs || []).find(d => d.cover_i) || null;
-      if (!hit) { toast('No cover found'); return; }
-      const coverUrl = `https://covers.openlibrary.org/b/id/${hit.cover_i}-L.jpg`;
-      $('#coverUrl').value = coverUrl;
-      $('#coverUrl').dispatchEvent(new Event('input'));
-      // also fill missing meta from result, but never overwrite
-      const fillIfBlank = (sel, val) => { if (val && !$(sel).value) $(sel).value = val; };
-      fillIfBlank('[name="author"]', (hit.author_name || [])[0]);
-      if (hit.first_publish_year && !$('[name="publicationDate"]').value) {
-        $('[name="publicationDate"]').value = `${hit.first_publish_year}-01-01`;
+      const results = await searchCovers(t, a);
+      const picker = $('#coverPicker');
+      if (!results.length) {
+        picker.style.display = '';
+        picker.innerHTML = `<div class="helper">No covers found. Try refining the title or author.</div>`;
+        toast('No covers found');
+        return;
       }
-      if (hit.number_of_pages_median && !$('[name="pageCount"]').value) {
-        $('[name="pageCount"]').value = hit.number_of_pages_median;
-      }
-      toast('Cover added');
+      picker.style.display = '';
+      picker.innerHTML = `
+        <div class="picker-hd">
+          <span>Tap a cover to use it · ${results.length} results</span>
+          <button type="button" onclick="document.getElementById('coverPicker').style.display='none'">Hide</button>
+        </div>
+        <div class="cover-picker-grid">
+          ${results.map((r, i) => `
+            <button type="button" class="cover-pick" data-i="${i}" title="${attr((r.title||'') + (r.author ? ' — ' + r.author : ''))}">
+              <img loading="lazy" src="${attr(r.thumbUrl)}" alt="" onerror="this.style.opacity=0.2">
+              <span class="meta">${attr(r.sourceShort)}${r.year ? ' · ' + r.year : ''}</span>
+            </button>`).join('')}
+        </div>
+      `;
+      // make the picker findable by the click handler
+      window._coverResults = results;
+      $$('.cover-pick').forEach(btn2 => btn2.onclick = () => {
+        const r = window._coverResults[+btn2.dataset.i];
+        $('#coverUrl').value = r.coverUrl;
+        $('#coverUrl').dispatchEvent(new Event('input'));
+        const fillIfBlank = (sel, val) => { if (val && !$(sel).value) $(sel).value = val; };
+        fillIfBlank('[name="author"]', r.author);
+        if (r.year && !$('[name="publicationDate"]').value) {
+          $('[name="publicationDate"]').value = `${r.year}-01-01`;
+        }
+        if (r.pages && !$('[name="pageCount"]').value) {
+          $('[name="pageCount"]').value = r.pages;
+        }
+        $$('.cover-pick').forEach(x => x.classList.remove('on'));
+        btn2.classList.add('on');
+        toast('Cover applied');
+      });
     } catch (e) {
       toast('Lookup failed');
     } finally {
-      btn.innerHTML = 'Find cover from Open Library';
+      btn.innerHTML = 'Find covers';
       btn.disabled = false;
     }
   };
@@ -509,6 +532,64 @@ function viewEdit(id) {
     toast('Saved');
     location.hash = `#/book/${updated.id}`;
   };
+}
+
+// ---------- cover search ----------
+async function searchCovers(title, author) {
+  const [ol, gb] = await Promise.all([
+    searchOpenLibrary(title, author).catch(() => []),
+    searchGoogleBooks(title, author).catch(() => []),
+  ]);
+  // Interleave so the picker shows a mix at the top instead of one source first
+  const merged = [];
+  const maxLen = Math.max(ol.length, gb.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (ol[i]) merged.push(ol[i]);
+    if (gb[i]) merged.push(gb[i]);
+  }
+  return merged;
+}
+
+async function searchOpenLibrary(title, author) {
+  const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(title)}${author ? '&author=' + encodeURIComponent(author) : ''}&limit=8`;
+  const j = await fetch(url).then(r => r.json());
+  return (j.docs || [])
+    .filter(d => d.cover_i)
+    .map(d => ({
+      source: 'Open Library',
+      sourceShort: 'OL',
+      coverUrl: `https://covers.openlibrary.org/b/id/${d.cover_i}-L.jpg`,
+      thumbUrl: `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg`,
+      title: d.title,
+      author: (d.author_name || [])[0] || null,
+      year: d.first_publish_year || null,
+      pages: d.number_of_pages_median || null,
+    }))
+    .slice(0, 8);
+}
+
+async function searchGoogleBooks(title, author) {
+  const q = `intitle:${title}${author ? ' inauthor:' + author : ''}`;
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=8&printType=books`;
+  const j = await fetch(url).then(r => r.json());
+  return (j.items || [])
+    .filter(it => it.volumeInfo && it.volumeInfo.imageLinks)
+    .map(it => {
+      const vi = it.volumeInfo;
+      const raw = (vi.imageLinks.thumbnail || vi.imageLinks.smallThumbnail || '').replace(/^http:/, 'https:');
+      // request a larger image: drop edge=curl, set zoom=0
+      const big = raw.replace(/&edge=curl/, '').replace(/zoom=\d/, 'zoom=0');
+      return {
+        source: 'Google Books',
+        sourceShort: 'GB',
+        coverUrl: big,
+        thumbUrl: raw,
+        title: vi.title,
+        author: (vi.authors || [])[0] || null,
+        year: vi.publishedDate ? parseInt(vi.publishedDate.slice(0, 4), 10) || null : null,
+        pages: vi.pageCount || null,
+      };
+    });
 }
 
 // ---------- geocoding (Nominatim) ----------

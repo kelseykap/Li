@@ -203,6 +203,34 @@
   .cover-preview { display: flex; gap: 12px; align-items: flex-start; }
   .cover-preview img, .cover-preview .cover-placeholder { width: 80px; height: 120px; object-fit: cover; border-radius: 2px; }
   .cover-preview .col { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .cover-picker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+    gap: 8px;
+  }
+  .cover-pick {
+    padding: 4px; background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); width: auto; display: flex; flex-direction: column;
+    align-items: stretch; gap: 4px;
+  }
+  .cover-pick img {
+    width: 100%; aspect-ratio: 2/3; object-fit: cover;
+    background: var(--line); border-radius: 2px; display: block;
+  }
+  .cover-pick .meta {
+    font-size: 10px; color: var(--text-mute); letter-spacing: 0.3px;
+    text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cover-pick.on { border-color: var(--accent); border-width: 2px; padding: 3px; }
+  .picker-hd {
+    font-size: 11px; color: var(--text-mute); text-transform: uppercase;
+    letter-spacing: 0.6px; margin-bottom: 6px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .picker-hd button {
+    width: auto; padding: 4px 8px; font-size: 11px;
+    background: transparent; border: 1px solid var(--line); border-radius: 3px;
+  }
   .quote-edit { display: flex; gap: 6px; margin-bottom: 6px; }
   .quote-edit textarea { min-height: 60px; }
   .quote-edit button { width: auto; padding: 8px 10px; }
