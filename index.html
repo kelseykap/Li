@@ -234,7 +234,10 @@
   .ch-list .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ch-list .title.done { color: var(--text-mute); text-decoration: line-through; }
   .ch-list .sub { color: var(--text-mute); font-size: 11px; }
-  .ch-menu-btn { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: var(--text-mute); font-size: 18px; line-height: 1; }
+  .ch-menu-btn { position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; padding: 0; border: 0; background: transparent; color: var(--text-mute); line-height: 1; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  .ch-menu-btn:active { color: var(--text); }
+  .ch-hd-link { cursor: pointer; }
+  .ch-hd-link:active .ch-name { color: var(--text-mute); }
   .ch-status-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; background: var(--line); color: var(--text-soft); margin-left: 4px; }
   .ch-status-pill.read { background: var(--accent-soft); color: var(--accent); }
   .ch-status-pill.dnf { background: var(--line); color: var(--text-mute); text-decoration: line-through; }
@@ -261,6 +264,23 @@
 
   /* form */
   .form .field { margin-bottom: 14px; }
+  .form .field.has-suggest { position: relative; }
+  .suggest-list {
+    position: absolute; left: 0; right: 0; top: 100%;
+    background: var(--surface); border: 1px solid var(--line-strong);
+    border-radius: var(--radius); margin-top: 2px;
+    max-height: 240px; overflow-y: auto;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+    z-index: 20; display: none;
+  }
+  .suggest-list.show { display: block; }
+  .suggest-item {
+    padding: 10px 12px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid var(--line);
+    line-height: 1.35;
+  }
+  .suggest-item:last-child { border-bottom: 0; }
+  .suggest-item:active, .suggest-item.hover { background: var(--accent-soft); }
   .form label { display: block; font-size: 11px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-mute); margin-bottom: 4px; }
   .form .row { display: flex; gap: 8px; }
   .form .row > * { flex: 1; }

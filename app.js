@@ -18,7 +18,7 @@ const fmtDate = (iso) => {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 };
-const RATING_LABELS = { 1: 'ok', 2: 'good', 3: 'loved', 4: 'favourite' };
+const RATING_LABELS = { 1: 'Ok', 2: 'Good', 3: 'Loved', 4: 'Favourite' };
 const debounce = (fn, ms = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const toast = (msg, ms = 1800) => {
   const el = $('#toast');
@@ -251,7 +251,7 @@ function renderFilters() {
     bookmarked: State.books.filter(b => b.bookmarked).length,
   };
   const labels = { all: 'All', read: 'Read', tbr: 'TBR', dnf: 'DNF', bookmarked: 'Bookmarked' };
-  $('#filtersRow').innerHTML = ['all','read','tbr','dnf','bookmarked'].map(f => `
+  $('#filtersRow').innerHTML = ['all','read','tbr','bookmarked','dnf'].map(f => `
     <button class="pill ${State.filter===f?'on':''}" data-f="${f}">
       ${labels[f]}
       <span style="opacity:0.55"> ${counts[f]}</span>
@@ -270,7 +270,7 @@ function renderToolbar() {
 
   if (tool === 'search') {
     html = `
-      <input type="search" id="search" placeholder="Search title or author" value="${attr(State.search)}" autocomplete="off">
+      <input type="search" id="search" placeholder="Search title, author, genre" value="${attr(State.search)}" autocomplete="off">
       <button class="icon-btn" id="closeTool" aria-label="Close search">
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>`;
@@ -329,7 +329,16 @@ function renderToolbar() {
       renderBookList();
     };
   } else if (tool === 'sort') {
-    $('#sort').onchange = e => { State.sort = e.target.value; savePrefs(); renderBookList(); };
+    $('#sort').onchange = e => {
+      State.sort = e.target.value;
+      // Rating + Date Read only make sense for read books — auto-switch the filter
+      if ((State.sort === 'rating' || State.sort === 'date') && State.filter !== 'read') {
+        State.filter = 'read';
+        renderFilters();
+      }
+      savePrefs();
+      renderBookList();
+    };
     $('#dirBtn').onclick = () => {
       State.sortDir = State.sortDir === 'desc' ? 'asc' : 'desc';
       savePrefs();
@@ -408,7 +417,11 @@ function applyFilter(books) {
   else if (State.filter === 'bookmarked') out = out.filter(b => b.bookmarked);
   const q = State.search.trim().toLowerCase();
   if (q) {
-    out = out.filter(b => (b.title || '').toLowerCase().includes(q) || (b.author || '').toLowerCase().includes(q));
+    out = out.filter(b =>
+      (b.title || '').toLowerCase().includes(q) ||
+      (b.author || '').toLowerCase().includes(q) ||
+      (b.genre || '').toLowerCase().includes(q)
+    );
   }
   // Base sorts produce a "natural" order. sortDir then reverses if 'asc'.
   // Natural = the order that makes intuitive sense for the field:
@@ -465,7 +478,7 @@ function viewDetail(id) {
   if (b.publicationDate) meta.push(['Published', fmtDate(b.publicationDate)]);
   if (b.location) meta.push(['Location', esc(b.location)]);
   if (b.genre) meta.push(['Genre', esc(b.genre)]);
-  if (b.status === 'read' && b.rating) meta.push(['Rating', `${renderRating(b.rating, true)} <span style="color:var(--text-soft);margin-left:6px">${RATING_LABELS[b.rating]}</span>`]);
+  if (b.status === 'read' && b.rating) meta.push(['Rating', renderRating(b.rating, true)]);
   if (b.status === 'tbr') meta.push(['Status', b.bookmarked ? 'TBR · bookmarked' : 'TBR']);
   if (b.status === 'dnf') meta.push(['Status', 'Did not finish']);
 
@@ -513,7 +526,7 @@ function viewEdit(id) {
         <input name="author" value="${attr(b.author)}" autocomplete="off">
       </div>
       <div class="row">
-        <div class="field">
+        <div class="field" style="flex:3">
           <label>Status</label>
           <div class="seg">
             <button type="button" data-status="tbr" class="${b.status==='tbr'?'on':''}">TBR</button>
@@ -521,7 +534,7 @@ function viewEdit(id) {
             <button type="button" data-status="dnf" class="${b.status==='dnf'?'on':''}">DNF</button>
           </div>
         </div>
-        <div class="field">
+        <div class="field" style="flex:2">
           <label>Medium</label>
           <div class="seg">
             <button type="button" data-medium="book" class="${b.medium!=='audio'?'on':''}">Book</button>
@@ -564,9 +577,10 @@ function viewEdit(id) {
           <input type="date" name="publicationDate" value="${attr(b.publicationDate||'')}">
         </div>
       </div>
-      <div class="field">
+      <div class="field has-suggest">
         <label>Location <span style="text-transform:none;color:var(--text-mute)">(setting of the book)</span></label>
-        <input name="location" value="${attr(b.location||'')}" placeholder="e.g. Dublin, Ireland" autocomplete="off">
+        <input name="location" id="locationInput" value="${attr(b.location||'')}" placeholder="e.g. Dublin, Ireland" autocomplete="off">
+        <div class="suggest-list" id="locSuggest"></div>
         <div class="helper">Geocoded for the map on save.</div>
       </div>
       <div class="field">
@@ -640,6 +654,9 @@ function viewEdit(id) {
       ? `<img class="cover" src="${attr(url)}" alt="">`
       : `<div class="cover-placeholder">?</div>`;
   };
+
+  // location autocomplete via Nominatim
+  bindLocationAutocomplete();
 
   // helpers reachable globally
   function getRating() { return $('#ratingPick').dataset.value || null; }
@@ -798,6 +815,85 @@ async function searchGoogleBooks(title, author) {
     });
 }
 
+// ---------- location autocomplete (Nominatim) ----------
+function nominatimDisplay(item) {
+  // Build a clean "City, Region, Country" string from address parts when possible.
+  const a = item.address || {};
+  const place = a.city || a.town || a.village || a.hamlet || a.suburb || a.county || a.state_district;
+  const region = a.state;
+  const country = a.country;
+  const parts = [place, region, country].filter(Boolean);
+  // Deduplicate consecutive identical parts (e.g. country == state for city-states)
+  const dedup = parts.filter((p, i) => p !== parts[i - 1]);
+  return dedup.length ? dedup.join(', ') : item.display_name;
+}
+
+let _locDebounce = null;
+function bindLocationAutocomplete() {
+  const input = $('#locationInput');
+  const list = $('#locSuggest');
+  if (!input || !list) return;
+  let hover = -1; // keyboard index
+
+  const closeList = () => { list.classList.remove('show'); hover = -1; };
+
+  const fetchSuggestions = async (q) => {
+    if (q.length < 3) { closeList(); return; }
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5&addressdetails=1`;
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      const j = await r.json();
+      if (!Array.isArray(j) || !j.length) { closeList(); return; }
+      list.innerHTML = j.map((it, i) => {
+        const display = nominatimDisplay(it);
+        return `<div class="suggest-item" data-i="${i}" data-display="${attr(display)}" data-lat="${attr(it.lat)}" data-lon="${attr(it.lon)}">${esc(display)}</div>`;
+      }).join('');
+      list.classList.add('show');
+      list.querySelectorAll('.suggest-item').forEach(el => {
+        // Use mousedown so we beat the input's blur event
+        el.addEventListener('mousedown', (ev) => {
+          ev.preventDefault();
+          input.value = el.dataset.display;
+          // Pre-cache the geocode so save doesn't re-query
+          try {
+            geocode._cache = geocode._cache || JSON.parse(localStorage.getItem('lib.geo.v1') || '{}');
+            geocode._cache[el.dataset.display] = { lat: +el.dataset.lat, lng: +el.dataset.lon };
+            localStorage.setItem('lib.geo.v1', JSON.stringify(geocode._cache));
+          } catch {}
+          closeList();
+        });
+      });
+    } catch {
+      closeList();
+    }
+  };
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    clearTimeout(_locDebounce);
+    _locDebounce = setTimeout(() => fetchSuggestions(q), 450);
+  });
+  input.addEventListener('focus', () => {
+    if (list.innerHTML && input.value.trim().length >= 3) list.classList.add('show');
+  });
+  input.addEventListener('blur', () => {
+    // delay so mousedown on suggestion runs first
+    setTimeout(closeList, 150);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (!list.classList.contains('show')) return;
+    const items = list.querySelectorAll('.suggest-item');
+    if (e.key === 'ArrowDown') { e.preventDefault(); hover = Math.min(hover + 1, items.length - 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); hover = Math.max(hover - 1, 0); }
+    else if (e.key === 'Enter' && hover >= 0) {
+      e.preventDefault();
+      items[hover].dispatchEvent(new MouseEvent('mousedown'));
+      return;
+    } else if (e.key === 'Escape') { closeList(); return; }
+    items.forEach((el, i) => el.classList.toggle('hover', i === hover));
+  });
+}
+
 // ---------- geocoding (Nominatim) ----------
 async function geocode(q) {
   if (!q) return null;
@@ -887,7 +983,7 @@ function viewStats() {
       <div><div class="k">This year</div><div class="v">${audioThisYear.length}</div></div>
     </div>` : `<div class="empty">No audiobooks logged yet.</div>`}
 
-    <div class="section-h">Reading pace <span style="text-transform:none;color:var(--text-mute)">· physical</span></div>
+    <div class="section-h">Reading pace</div>
     <div class="meta-grid">
       <div><div class="k">Avg days / book</div><div class="v">${avgDaysPerBook ?? '—'}</div></div>
       <div><div class="k">Avg pages / day</div><div class="v">${avgPagesPerDay ?? '—'}</div></div>
@@ -1108,8 +1204,10 @@ function challengeCard(ch) {
     : p.total === 0 ? '0' : `${p.done} / ${p.total}`;
   return `
     <div class="ch-card">
-      <button class="ch-menu-btn" onclick="location.hash='#/challenge/${attr(ch.id)}/edit'" aria-label="Edit challenge">⋯</button>
-      <div class="ch-hd">
+      <button class="ch-menu-btn" onclick="location.hash='#/challenge/${attr(ch.id)}/edit'" aria-label="Edit challenge" title="Edit or delete">
+        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="1.6" fill="none"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+      </button>
+      <div class="ch-hd ch-hd-link" onclick="location.hash='#/challenge/${attr(ch.id)}/edit'">
         <div class="ch-name">${esc(ch.name)}</div>
         <div class="ch-progress">${progressText}</div>
       </div>
