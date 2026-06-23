@@ -6,12 +6,14 @@
 //   - Static images (icons, manifest): cache-first (rarely change).
 //   - Cross-origin (Open Library, Google Books, Nominatim, GitHub API, OSM tiles, Leaflet CDN): pass through, not cached.
 
-const VERSION = 'lib-v3';
+const VERSION = 'lib-v4';
 const SHELL = [
   './',
   './index.html',
   './app.js',
   './manifest.json',
+  './icon.png',
+  './logo.png',
   './icon-192.png',
   './icon-512.png',
 ];

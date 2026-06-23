@@ -156,9 +156,13 @@ function getBook(id) { return State.books.find(b => b.id === id); }
 
 // ---------- header ----------
 function setHeader({ title = 'Library', back = false, right = '' } = {}) {
+  // The Library home shows the logo image instead of the word; everywhere else uses text.
+  const titleHtml = title === 'Library'
+    ? `<img src="logo.png" alt="Library" class="header-logo">`
+    : esc(title);
   $('#header').innerHTML = `
     ${back ? `<button class="icon-btn" onclick="history.back()" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>` : `<span style="width:36px"></span>`}
-    <h1>${esc(title)}</h1>
+    <h1>${titleHtml}</h1>
     ${right || `<span style="width:36px"></span>`}
   `;
 }

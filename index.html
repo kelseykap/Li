@@ -11,6 +11,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="icon" type="image/png" sizes="any" href="icon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 
 <!-- iOS web-app behaviour -->
@@ -87,7 +88,8 @@
     display: flex; align-items: center; gap: 8px;
     font-weight: 500;
   }
-  .header h1 { font-size: 17px; font-weight: 500; margin: 0; flex: 1; text-align: center; letter-spacing: 0.2px; }
+  .header h1 { font-size: 17px; font-weight: 500; margin: 0; flex: 1; text-align: center; letter-spacing: 0.2px; line-height: 1; }
+  .header-logo { height: 28px; width: auto; display: inline-block; vertical-align: middle; }
   .icon-btn {
     width: 36px; height: 36px; padding: 0; border: 0; background: transparent;
     display: inline-flex; align-items: center; justify-content: center;
