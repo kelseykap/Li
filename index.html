@@ -187,6 +187,19 @@
   .rating-dots.accent .d.on { background: var(--accent); }
   .empty { color: var(--text-mute); text-align: center; padding: 40px 16px; }
 
+  /* sync banner — shown on Library and Settings */
+  .sync-banner {
+    display: none;
+    padding: 8px 12px; border-radius: var(--radius);
+    font-size: 12px; line-height: 1.4;
+    margin: 10px 0 4px;
+    border: 1px solid transparent;
+  }
+  .sync-banner.ok    { display: block; background: transparent; color: var(--text-mute); text-align: center; padding: 6px; }
+  .sync-banner.warn  { display: block; background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+  .sync-banner.err   { display: block; background: var(--accent-soft); color: var(--warn); border-color: var(--warn); font-weight: 500; }
+  .sync-banner a     { text-decoration: underline; }
+
   /* grid view */
   .book-grid {
     display: grid;

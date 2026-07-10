@@ -86,42 +86,57 @@ async function loadBooks() {
   try {
     const s = localStorage.getItem(STORE_KEY);
     if (s) local = JSON.parse(s);
-  } catch {}
+  } catch (e) { console.warn('[load] localStorage read failed:', e); }
 
-  // Always try to fetch the source-of-truth from the repo too, so we can
-  // pick up edits made on another device. If we're offline, we just use local.
+  // Also try the repo copy — pick up cross-device edits.
   let remote = null;
   try {
     const r = await fetch('books.json', { cache: 'no-store' });
     if (r.ok) remote = await r.json();
-  } catch {}
+  } catch (e) { console.warn('[load] remote fetch failed:', e); }
 
-  let chosen;
-  if (local && remote) {
-    if (local.dirty) {
-      // local has unpushed edits — keep them, don't blow them away with remote
-      chosen = local;
-    } else {
-      // both clean: prefer whichever updatedAt is newer
-      const lt = local.updatedAt || '';
-      const rt = remote.updatedAt || '';
-      chosen = lt >= rt ? local : remote;
-    }
-  } else {
-    chosen = local || remote || { books: [], challenges: DEFAULT_CHALLENGES.slice() };
-  }
+  const localBooks = (local && local.books) || [];
+  const remoteBooks = (remote && remote.books) || [];
+  const localChallenges = local && local.challenges;
+  const remoteChallenges = remote && remote.challenges;
 
-  State.books = chosen.books || [];
-  State.challenges = chosen.challenges;
-  State.dirty = !!(local && local.dirty && chosen === local);
+  // Per-item merge by id: for each book, keep whichever copy has the newer
+  // updatedAt. This is safe — an entry that exists locally can NEVER be
+  // silently dropped just because a stale remote didn't include it.
+  State.books = mergeById(localBooks, remoteBooks);
+  State.challenges = mergeById(localChallenges || [], remoteChallenges || []);
+  if (!localChallenges && !remoteChallenges) State.challenges = undefined;
+
+  // Dirty is preserved from local; local is authoritative for pending edits.
+  State.dirty = !!(local && local.dirty);
   seedDefaultsIfNeeded();
   persist();
   State.loaded = true;
 
-  // If we replaced local with a newer remote, no further action needed.
-  // If local was dirty and an auto-sync is possible, kick one off so unpushed
-  // edits from a previous session get pushed now that we're back online.
+  console.log('[load]', {
+    localCount: localBooks.length,
+    remoteCount: remoteBooks.length,
+    mergedCount: State.books.length,
+    localDirty: !!(local && local.dirty),
+    localUpdatedAt: local && local.updatedAt,
+    remoteUpdatedAt: remote && remote.updatedAt,
+  });
+
+  // If we have unpushed edits and connectivity, kick off a sync.
   if (State.dirty) scheduleAutoSync(500);
+}
+
+function mergeById(a, b) {
+  // Union of two lists of {id, updatedAt}. Later updatedAt wins per id.
+  const map = new Map();
+  const upsert = (item) => {
+    if (!item || !item.id) return;
+    const cur = map.get(item.id);
+    if (!cur || (item.updatedAt || '') > (cur.updatedAt || '')) map.set(item.id, item);
+  };
+  a.forEach(upsert);
+  b.forEach(upsert);
+  return [...map.values()];
 }
 
 function seedDefaultsIfNeeded() {
@@ -235,15 +250,15 @@ function viewLibrary() {
     right: `<a href="#/add" class="icon-btn" aria-label="Add book"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>`
   });
   $('#app').innerHTML = `
+    <div id="syncBanner" class="sync-banner"></div>
     <div class="filters" id="filtersRow"></div>
     <div class="search-row" id="toolbar"></div>
     <div id="bookListWrap"></div>
-    <div id="dirtyNote"></div>
   `;
+  renderSyncBanner();
   renderFilters();
   renderToolbar();
   renderBookList();
-  renderDirtyNote();
 }
 
 function renderFilters() {
@@ -368,11 +383,6 @@ function renderBookList() {
   $('#bookListWrap').innerHTML = html;
 }
 
-function renderDirtyNote() {
-  $('#dirtyNote').innerHTML = State.dirty
-    ? `<div class="empty" style="font-size:12px;padding:24px 0 0">Unsaved changes · <a href="#/settings" style="text-decoration:underline">sync to GitHub</a></div>`
-    : '';
-}
 
 function bookCard(b) {
   const showCorner = b.bookmarked || (b.status === 'read' && b.rating) || b.status === 'dnf';
@@ -1344,6 +1354,7 @@ function viewSettings() {
   const pat = getPat();
   const masked = pat ? '•'.repeat(Math.min(20, pat.length)) : '';
   $('#app').innerHTML = `
+    <div id="syncBanner" class="sync-banner"></div>
     <div class="group">
       <h3>GitHub Sync</h3>
       <p>Push your books.json to a repo so it syncs across devices and lives in version control.</p>
@@ -1394,11 +1405,22 @@ function viewSettings() {
       </div>
     </div>
 
-    <div style="text-align:center;color:var(--text-mute);font-size:12px;padding:24px 0">
-      ${State.books.length} books · ${State.dirty ? 'unsaved changes' : 'in sync'}
+    <div class="group">
+      <h3>Diagnostics</h3>
+      <p style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;color:var(--text-soft)">
+        Books: <b>${State.books.length}</b><br>
+        Challenges: <b>${(State.challenges||[]).length}</b><br>
+        Local dirty: <b>${State.dirty ? 'yes' : 'no'}</b><br>
+        Sync status: <b>${computeSyncStatus()}</b><br>
+        Last successful sync: <b>${SyncState.lastSuccess ? new Date(SyncState.lastSuccess).toLocaleString() : '—'}</b><br>
+        Last error: <b>${esc(SyncState.lastError || '—')}</b><br>
+        Online: <b>${navigator.onLine ? 'yes' : 'no'}</b><br>
+        PAT configured: <b>${getPat() ? 'yes' : 'no'}</b>
+      </p>
     </div>
   `;
   $('#kindleFile').onchange = window._kindleImport;
+  renderSyncBanner();
 }
 
 window._saveCfg = () => {
@@ -1488,36 +1510,75 @@ async function pushToGitHub() {
   persist();
 }
 
+// Sync state — exposed so the UI can show current status
+const SyncState = { status: 'idle', lastError: null, lastSuccess: null };
+// status: 'idle' | 'pending' | 'syncing' | 'error' | 'offline' | 'no-pat'
+
+function computeSyncStatus() {
+  if (!getPat() || !State.config.owner || !State.config.repo) return 'no-pat';
+  if (!navigator.onLine) return 'offline';
+  if (SyncState.status === 'syncing') return 'syncing';
+  if (State.dirty) return SyncState.lastError ? 'error' : 'pending';
+  return 'synced';
+}
+
 // Auto-sync: debounced, single-flight, silent on success
 let _syncTimer = null;
 let _syncing = false;
 let _syncAgain = false;
-function scheduleAutoSync(delayMs = 2500) {
-  if (!getPat()) return;                // not configured
-  if (!State.config.owner || !State.config.repo) return;
-  if (!navigator.onLine) return;
+function scheduleAutoSync(delayMs = 800) {
+  if (computeSyncStatus() === 'no-pat') { renderSyncBanner(); return; }
+  if (!navigator.onLine) { renderSyncBanner(); return; }
   if (_syncTimer) clearTimeout(_syncTimer);
   _syncTimer = setTimeout(autoSync, delayMs);
+  renderSyncBanner();
 }
 async function autoSync() {
   if (!State.dirty) return;
   if (_syncing) { _syncAgain = true; return; }
   _syncing = true;
+  SyncState.status = 'syncing';
+  renderSyncBanner();
   try {
     await pushToGitHub();
-    // re-render any visible sync indicator (library footer, settings)
+    SyncState.lastError = null;
+    SyncState.lastSuccess = new Date().toISOString();
     const hash = location.hash || '#/';
     if (hash === '#/' || hash === '#/settings') route();
   } catch (e) {
-    console.warn('Auto-sync failed', e);
+    console.warn('[auto-sync] failed', e);
+    SyncState.lastError = e.message;
     toast('Auto-sync failed: ' + e.message, 3000);
   } finally {
     _syncing = false;
+    SyncState.status = 'idle';
+    renderSyncBanner();
     if (_syncAgain) { _syncAgain = false; setTimeout(autoSync, 800); }
   }
 }
+
+// A small status pill anchored to the library view + a warning banner in Settings.
+function renderSyncBanner() {
+  const el = document.getElementById('syncBanner');
+  if (!el) return;
+  const s = computeSyncStatus();
+  const map = {
+    'synced':    { text: 'All changes synced to GitHub', cls: 'ok' },
+    'pending':   { text: 'Unsaved edits — syncing shortly…', cls: 'warn' },
+    'syncing':   { text: 'Syncing to GitHub…', cls: 'warn' },
+    'offline':   { text: State.dirty ? 'Offline — edits will sync when you\'re back online' : 'Offline', cls: 'warn' },
+    'error':     { text: 'Sync failed: ' + (SyncState.lastError || 'unknown error') + ' · your edits are still on this device', cls: 'err' },
+    'no-pat':    { text: State.dirty
+      ? 'Not backed up. Your edits are only on this device — set up GitHub sync in Settings so you don\'t lose them.'
+      : 'Not backed up. Set up GitHub sync in Settings to keep your library safe.', cls: 'err' },
+  };
+  const it = map[s] || map.synced;
+  el.className = 'sync-banner ' + it.cls;
+  el.innerHTML = it.text + (s === 'no-pat' ? ` · <a href="#/settings" style="text-decoration:underline">Open Settings</a>` : '');
+}
 // Retry queued sync when the device comes back online
-window.addEventListener('online', () => { if (State.dirty) scheduleAutoSync(500); });
+window.addEventListener('online', () => { renderSyncBanner(); if (State.dirty) scheduleAutoSync(500); });
+window.addEventListener('offline', () => { renderSyncBanner(); });
 
 // Manual sync button — same core, with UI feedback
 window._sync = async () => {
