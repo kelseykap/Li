@@ -28,26 +28,40 @@ python3 -m http.server 8000
 
 The placeholder icon is a simple "L" — swap out `icon-192.png`, `icon-512.png`, `icon-192-maskable.png`, `icon-512-maskable.png`, and `apple-touch-icon.png` whenever you've got your real artwork.
 
-## Edit on phone, save to GitHub
+## Edit on phone, save to the cloud
 
-Once you set up GitHub sync, **every edit you make auto-pushes to the repo** about 2 seconds after you save. Rapid edits batch into one commit. This means your library is always backed up — even if you clear your browser data, your books survive in the repo.
+Once you set up a storage backend, **every edit you make auto-pushes to the cloud** about a second after you save. Rapid edits batch into a single push. This means your library is always backed up — even if you clear your browser data, your books survive in the cloud.
 
-To set it up once:
+You can pick between two backends in **Settings → Storage backend**:
 
-1. Create a [fine-grained personal access token](https://github.com/settings/tokens?type=beta):
-   - **Repository access**: only this repo
-   - **Permissions → Repository → Contents**: **Read and write**
-2. In the app, open **Settings** and fill in:
-   - Owner (your GitHub username)
-   - Repo (the repo name)
-   - Branch (usually `main`)
-   - Path (`books.json` if you keep the default)
-   - Token (paste it — stored only on this device's local storage)
-3. Hit **Save settings**. From now on, edits auto-sync. The manual **Sync to GitHub** button still works if you want to force a push.
+### Option A — Google Drive (recommended for ease of use)
 
-The "Unsaved changes" footer on the Library tab tells you when edits haven't been pushed yet (it'll clear within a couple seconds of saving when auto-sync runs). If auto-sync fails (e.g. offline or PAT expired), you'll see a toast and the dirty flag stays until you're back online or fix the issue — then it retries automatically.
+One-time setup (~10 minutes):
 
-**Multi-device:** when you open the app on another device, it fetches the latest `books.json` from the repo and uses that if it's newer than the local copy. Your edits sync across devices via GitHub automatically.
+1. Go to [console.cloud.google.com](https://console.cloud.google.com), create a new project (any name).
+2. In that project, **APIs & Services → Library**, find **Google Drive API** and click **Enable**.
+3. **APIs & Services → OAuth consent screen**: choose External, fill in the required fields (app name, your email as user support and developer contact), save and continue through the scopes/test users screens without adding anything.
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
+   - Application type: **Web application**
+   - Authorised JavaScript origins: add your app's URL (e.g. `https://your-username.github.io` — no trailing slash, no path)
+   - Click Create; copy the **Client ID** (it ends in `.apps.googleusercontent.com`)
+5. In the app: **Settings → Google Drive**, paste the Client ID, tap **Save Client ID**, then **Sign in with Google**.
+6. If you already had books in GitHub sync: tap **Migrate books from GitHub → Drive**. Your library is copied over in one push.
+
+Your data lives in Drive's `appDataFolder` — a private per-app folder that doesn't show up in your normal Drive view. Only this app (with this Client ID) can read it.
+
+### Option B — GitHub (version control bonus)
+
+1. Create a [fine-grained personal access token](https://github.com/settings/tokens?type=beta) with **Contents: read & write** on your library repo. (Or a classic PAT with `repo` scope for no expiration.)
+2. In the app, **Settings → GitHub**: fill in owner, repo, branch, path, and paste the token.
+
+Every edit becomes a git commit — you get free version history of your reading log.
+
+### Common behavior
+
+The sync banner at the top of Library and Settings tells you the current state: synced, syncing, pending, offline, error, or not configured. If auto-sync fails (e.g. token expired), you'll see the error and edits stay on your device until you fix the issue — then a retry runs automatically.
+
+**Multi-device:** when you open the app on another device, it fetches the latest library from your backend and merges with the local copy on a per-book basis. A book that exists on one device but not the other is preserved.
 
 ## Getting code updates
 

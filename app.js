@@ -1,9 +1,15 @@
 /* Library - book tracker
-   Single-page hash-routed app. Books stored in books.json (in repo),
-   working copy in localStorage. Sync to GitHub via PAT.
+   Single-page hash-routed app. Storage: Google Drive appDataFolder.
+   Local working copy in localStorage, synced to Drive after each edit.
 */
 (() => {
 'use strict';
+
+// ============ CONFIGURATION ============
+// Paste your Google Cloud OAuth Client ID here.
+// Ends in .apps.googleusercontent.com — see README for setup.
+const GOOGLE_CLIENT_ID = '289924269816-am9fec1ve1u0hsri47gc82r2sm6cfltn.apps.googleusercontent.com';
+// =======================================
 
 // ---------- helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -70,11 +76,221 @@ function savePrefs() {
 }
 
 function loadConfig() {
-  try { State.config = Object.assign(State.config, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch {}
+  // Config is now hardcoded — no user-facing form. Reads from constants above.
+  State.config = {
+    backend: 'gdrive',
+    driveClientId: GOOGLE_CLIENT_ID,
+  };
 }
-function saveConfig() { localStorage.setItem(CFG_KEY, JSON.stringify(State.config)); }
-function getPat() { return localStorage.getItem(PAT_KEY) || ''; }
-function setPat(v) { v ? localStorage.setItem(PAT_KEY, v) : localStorage.removeItem(PAT_KEY); }
+// Kept for backwards compatibility with any leftover code paths, but no longer used.
+function saveConfig() { /* no-op — config is hardcoded */ }
+function getPat() { return ''; }
+function setPat(_) { /* no-op */ }
+
+// ---------- storage backends ----------
+// GitHub backend: uses PAT + Contents API. Data lives at owner/repo/path.
+// Google Drive backend: uses OAuth via GIS + Drive API v3. Data lives in appDataFolder (private per-app).
+
+async function loadGithubFile() {
+  const r = await fetch('books.json', { cache: 'no-store' });
+  if (r.ok) return r.json();
+  return null;
+}
+
+async function pushGithubFile(doc) {
+  const cfg = State.config;
+  const pat = getPat();
+  if (!cfg.owner || !cfg.repo) throw new Error('Repo not configured');
+  if (!pat) throw new Error('No PAT configured');
+  const api = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodeURIComponent(cfg.path||'books.json')}`;
+  let sha = null;
+  const head = await fetch(`${api}?ref=${encodeURIComponent(cfg.branch||'main')}`, {
+    headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json' }
+  });
+  if (head.status === 200) sha = (await head.json()).sha;
+  else if (head.status !== 404) throw new Error(`HEAD ${head.status}`);
+  const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))));
+  const put = await fetch(api, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: `Update books.json (${(doc.books||[]).length} books)`,
+      content, branch: cfg.branch || 'main', sha: sha || undefined,
+    }),
+  });
+  if (!put.ok) {
+    const t = await put.text();
+    throw new Error(`PUT ${put.status}: ${t.slice(0, 120)}`);
+  }
+}
+
+// --- Google Drive ---
+const DRIVE_TOKEN_KEY = 'lib.gdrive.token.v1';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+let _tokenClient = null;
+let _tokenWaiters = [];
+
+function getDriveTokenCached() {
+  try {
+    const c = JSON.parse(localStorage.getItem(DRIVE_TOKEN_KEY) || 'null');
+    if (c && c.access_token && c.expires_at > Date.now() + 5000) return c.access_token;
+  } catch {}
+  return null;
+}
+function setDriveTokenCached(access_token, expires_in) {
+  const expires_at = Date.now() + ((expires_in || 3600) - 60) * 1000;
+  localStorage.setItem(DRIVE_TOKEN_KEY, JSON.stringify({ access_token, expires_at }));
+}
+function clearDriveToken() { localStorage.removeItem(DRIVE_TOKEN_KEY); }
+function isDriveSignedIn() { return !!getDriveTokenCached(); }
+
+function initDriveTokenClient() {
+  const clientId = State.config.driveClientId;
+  if (!clientId) throw new Error('Google Drive Client ID not set');
+  if (!window.google || !google.accounts || !google.accounts.oauth2) {
+    throw new Error('Google Identity Services not loaded — check your network');
+  }
+  if (_tokenClient && _tokenClient._clientId === clientId) return _tokenClient;
+  _tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: DRIVE_SCOPE,
+    callback: (resp) => {
+      if (resp.error) {
+        const waiters = _tokenWaiters; _tokenWaiters = [];
+        waiters.forEach(w => w.reject(new Error(resp.error_description || resp.error)));
+        return;
+      }
+      setDriveTokenCached(resp.access_token, resp.expires_in);
+      const waiters = _tokenWaiters; _tokenWaiters = [];
+      waiters.forEach(w => w.resolve(resp.access_token));
+    },
+  });
+  _tokenClient._clientId = clientId;
+  return _tokenClient;
+}
+
+async function getDriveToken({ interactive = false } = {}) {
+  const cached = getDriveTokenCached();
+  if (cached) return cached;
+  const client = initDriveTokenClient();
+  return new Promise((resolve, reject) => {
+    _tokenWaiters.push({ resolve, reject });
+    try {
+      // prompt: '' → silent if user is signed in to Google in this browser;
+      // prompt: 'consent' → forces the consent screen (first-time sign-in)
+      client.requestAccessToken({ prompt: interactive ? 'consent' : '' });
+    } catch (e) { reject(e); return; }
+    setTimeout(() => {
+      const idx = _tokenWaiters.findIndex(w => w.resolve === resolve);
+      if (idx >= 0) { _tokenWaiters.splice(idx, 1); reject(new Error('Sign-in timed out')); }
+    }, 30000);
+  });
+}
+
+async function driveApi(pathAndQuery, opts = {}) {
+  const token = await getDriveToken();
+  const url = pathAndQuery.startsWith('http') ? pathAndQuery : 'https://www.googleapis.com/' + pathAndQuery;
+  const r = await fetch(url, {
+    ...opts,
+    headers: { ...(opts.headers||{}), Authorization: 'Bearer ' + token },
+  });
+  if (r.status === 401 || r.status === 403) {
+    // token might have been revoked — force a re-auth on the next call
+    clearDriveToken();
+  }
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`Drive ${r.status}: ${t.slice(0, 120)}`);
+  }
+  return r;
+}
+
+async function findDriveFile() {
+  const q = encodeURIComponent("name='books.json' and 'appDataFolder' in parents and trashed=false");
+  const r = await driveApi(`drive/v3/files?q=${q}&spaces=appDataFolder&fields=files(id,name,modifiedTime)`);
+  const j = await r.json();
+  return (j.files && j.files[0]) || null;
+}
+
+async function loadDriveFile() {
+  if (!State.config.driveClientId) return null;
+  if (!isDriveSignedIn()) return null; // don't force a popup on app load
+  try {
+    const file = await findDriveFile();
+    if (!file) return null;
+    const r = await driveApi(`drive/v3/files/${encodeURIComponent(file.id)}?alt=media`);
+    return r.json();
+  } catch (e) {
+    console.warn('[gdrive] load failed', e);
+    return null;
+  }
+}
+
+async function pushDriveFile(doc) {
+  const content = JSON.stringify(doc, null, 2);
+  const existing = await findDriveFile();
+  if (existing) {
+    await driveApi(
+      `upload/drive/v3/files/${encodeURIComponent(existing.id)}?uploadType=media`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: content }
+    );
+  } else {
+    const boundary = '----lib' + Date.now().toString(36);
+    const metadata = { name: 'books.json', parents: ['appDataFolder'] };
+    const body =
+      `--${boundary}\r\n` +
+      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+      JSON.stringify(metadata) + '\r\n' +
+      `--${boundary}\r\n` +
+      'Content-Type: application/json\r\n\r\n' +
+      content + '\r\n' +
+      `--${boundary}--`;
+    await driveApi(
+      'upload/drive/v3/files?uploadType=multipart',
+      { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body }
+    );
+  }
+}
+
+const Backends = {
+  github: {
+    label: 'GitHub',
+    isConfigured: () => !!(getPat() && State.config.owner && State.config.repo),
+    load: loadGithubFile,
+    push: pushGithubFile,
+    authLabel: () => getPat() ? 'PAT saved' : 'not signed in',
+  },
+  gdrive: {
+    label: 'Google Drive',
+    isConfigured: () => !!State.config.driveClientId && isDriveSignedIn(),
+    load: loadDriveFile,
+    push: pushDriveFile,
+    authLabel: () => isDriveSignedIn() ? 'signed in' : (State.config.driveClientId ? 'not signed in' : 'no client ID'),
+  },
+};
+
+function currentBackend() {
+  return Backends[State.config.backend] || Backends.github;
+}
+
+// Ask the browser to treat our storage as persistent so it doesn't evict the
+// PAT or the local books cache. On Chrome/Edge this is auto-granted for
+// installed PWAs and sites with high engagement. On Firefox it shows a prompt.
+// On iOS Safari there's no persistent-storage API; WebKit's 7-day rule applies
+// regardless. We call this on load and on PAT save.
+async function ensurePersistentStorage() {
+  if (!navigator.storage || !navigator.storage.persist) return null;
+  try {
+    const already = await navigator.storage.persisted();
+    if (already) return true;
+    const granted = await navigator.storage.persist();
+    console.log('[storage] persistent granted:', granted);
+    return granted;
+  } catch (e) {
+    console.warn('[storage] persist request failed', e);
+    return null;
+  }
+}
 
 // ---------- storage ----------
 async function loadBooks() {
@@ -88,12 +304,20 @@ async function loadBooks() {
     if (s) local = JSON.parse(s);
   } catch (e) { console.warn('[load] localStorage read failed:', e); }
 
-  // Also try the repo copy — pick up cross-device edits.
+  // Try the remote copy — pick up cross-device edits.
   let remote = null;
   try {
-    const r = await fetch('books.json', { cache: 'no-store' });
-    if (r.ok) remote = await r.json();
+    remote = await currentBackend().load();
   } catch (e) { console.warn('[load] remote fetch failed:', e); }
+  // If the active backend has nothing (e.g. not signed in yet), fall back to
+  // the public books.json in the repo as a seed. Once the user signs in and
+  // migrates, Drive becomes the source of truth.
+  if (!remote) {
+    try {
+      const r = await fetch('books.json', { cache: 'no-store' });
+      if (r.ok) remote = await r.json();
+    } catch {}
+  }
 
   const localBooks = (local && local.books) || [];
   const remoteBooks = (remote && remote.books) || [];
@@ -170,13 +394,16 @@ function deleteBook(id) {
 function getBook(id) { return State.books.find(b => b.id === id); }
 
 // ---------- header ----------
-function setHeader({ title = 'Library', back = false, right = '' } = {}) {
-  // The Library home shows the logo image instead of the word; everywhere else uses text.
+function setHeader({ title = 'Library', back = false, backHash = null, right = '' } = {}) {
   const titleHtml = title === 'Library'
     ? `<img src="logo.png" alt="Library" class="header-logo">`
     : esc(title);
+  // backHash overrides history.back() so we can force navigation somewhere specific.
+  const backAction = backHash
+    ? `location.hash='${backHash}'`
+    : `history.back()`;
   $('#header').innerHTML = `
-    ${back ? `<button class="icon-btn" onclick="history.back()" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>` : `<span style="width:36px"></span>`}
+    ${back ? `<button class="icon-btn" onclick="${backAction}" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>` : `<span style="width:36px"></span>`}
     <h1>${titleHtml}</h1>
     ${right || `<span style="width:36px"></span>`}
   `;
@@ -200,7 +427,6 @@ const routes = [
   { re: /^#\/challenge\/new$/, view: () => viewChallengeEdit(null) },
   { re: /^#\/challenge\/([^/]+)\/edit$/, view: (m) => viewChallengeEdit(m[1]) },
   { re: /^#\/map$/, view: viewMap },
-  { re: /^#\/settings$/, view: viewSettings },
 ];
 function route() {
   const hash = location.hash || '#/';
@@ -268,9 +494,12 @@ function renderFilters() {
     tbr: State.books.filter(b => b.status === 'tbr').length,
     dnf: State.books.filter(b => b.status === 'dnf').length,
     bookmarked: State.books.filter(b => b.bookmarked).length,
+    book: State.books.filter(b => b.medium !== 'audio').length,
+    audio: State.books.filter(b => b.medium === 'audio').length,
   };
-  const labels = { all: 'All', read: 'Read', tbr: 'TBR', dnf: 'DNF', bookmarked: 'Bookmarked' };
-  $('#filtersRow').innerHTML = ['all','read','tbr','bookmarked','dnf'].map(f => `
+  const labels = { all: 'All', read: 'Read', tbr: 'TBR', dnf: 'DNF', bookmarked: 'Bookmarked', book: 'Books', audio: 'Audiobooks' };
+  const order = ['all','read','tbr','bookmarked','dnf','book','audio'];
+  $('#filtersRow').innerHTML = order.map(f => `
     <button class="pill ${State.filter===f?'on':''}" data-f="${f}">
       ${labels[f]}
       <span style="opacity:0.55"> ${counts[f]}</span>
@@ -289,7 +518,7 @@ function renderToolbar() {
 
   if (tool === 'search') {
     html = `
-      <input type="search" id="search" placeholder="Search title, author, genre" value="${attr(State.search)}" autocomplete="off">
+      <input type="search" id="search" placeholder="Search title, author, genre, country" value="${attr(State.search)}" autocomplete="off">
       <button class="icon-btn" id="closeTool" aria-label="Close search">
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>`;
@@ -429,12 +658,15 @@ function applyFilter(books) {
   else if (State.filter === 'tbr') out = out.filter(b => b.status === 'tbr');
   else if (State.filter === 'dnf') out = out.filter(b => b.status === 'dnf');
   else if (State.filter === 'bookmarked') out = out.filter(b => b.bookmarked);
+  else if (State.filter === 'book') out = out.filter(b => b.medium !== 'audio');
+  else if (State.filter === 'audio') out = out.filter(b => b.medium === 'audio');
   const q = State.search.trim().toLowerCase();
   if (q) {
     out = out.filter(b =>
       (b.title || '').toLowerCase().includes(q) ||
       (b.author || '').toLowerCase().includes(q) ||
-      (b.genre || '').toLowerCase().includes(q)
+      (b.genre || '').toLowerCase().includes(q) ||
+      (b.location || '').toLowerCase().includes(q)
     );
   }
   // Base sorts produce a "natural" order. sortDir then reverses if 'asc'.
@@ -476,11 +708,10 @@ function viewDetail(id) {
   setHeader({
     title: '',
     back: true,
+    backHash: '#/',
     right: `
-      <button class="icon-btn" onclick="window._toggleBookmark('${attr(b.id)}')" aria-label="${b.bookmarked?'Remove bookmark':'Bookmark'}">
-        ${b.bookmarked
-          ? '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-3.5L6 21z"/></svg>'
-          : '<svg viewBox="0 0 24 24"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-3.5L6 21z"/></svg>'}
+      <button class="icon-btn ${b.bookmarked?'on-accent':''}" onclick="window._toggleBookmark('${attr(b.id)}')" aria-label="${b.bookmarked?'Remove bookmark':'Bookmark'}">
+        <svg viewBox="0 0 24 24" class="${b.bookmarked?'filled':''}"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-3.5L6 21z"/></svg>
       </button>
       <button class="icon-btn" onclick="location.hash='#/book/${attr(b.id)}/edit'" aria-label="Edit"><svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
     `
@@ -527,6 +758,7 @@ function viewEdit(id) {
   setHeader({
     title: isNew ? 'Add book' : 'Edit',
     back: true,
+    backHash: '#/',
     right: `<button class="icon-btn" onclick="window._saveBook()" aria-label="Save"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></button>`
   });
   $('#app').innerHTML = `
@@ -962,6 +1194,7 @@ function viewStats() {
     : null;
 
   $('#app').innerHTML = `
+    <div id="syncBanner" class="sync-banner"></div>
     <div class="stat-hero" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:24px 0 20px">
       <div>
         <div class="n">${physicalThisYear.length}</div>
@@ -1004,6 +1237,7 @@ function viewStats() {
     </div>
     <div style="height:32px"></div>
   `;
+  renderSyncBanner();
 }
 
 // ---------- map ----------
@@ -1075,6 +1309,13 @@ function viewMap() {
 
 // ---------- challenges ----------
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+const _expandedCountries = new Set();
+window._toggleCountry = (chId, country) => {
+  const key = chId + '|' + country;
+  if (_expandedCountries.has(key)) _expandedCountries.delete(key);
+  else _expandedCountries.add(key);
+  if (location.hash === '#/challenges') route();
+};
 
 function stripArticle(s) {
   return String(s || '').replace(/^(the|a|an)\s+/i, '').trim();
@@ -1155,11 +1396,13 @@ function viewChallenges() {
     right: `<a href="#/challenge/new" class="icon-btn" aria-label="New challenge"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>`
   });
   const list = State.challenges || [];
+  const banner = `<div id="syncBanner" class="sync-banner"></div>`;
   if (!list.length) {
-    $('#app').innerHTML = `<div class="empty">No challenges yet. Tap + to create one.</div>`;
-    return;
+    $('#app').innerHTML = banner + `<div class="empty">No challenges yet. Tap + to create one.</div>`;
+  } else {
+    $('#app').innerHTML = banner + `<div>${list.map(challengeCard).join('')}</div>`;
   }
-  $('#app').innerHTML = `<div>${list.map(challengeCard).join('')}</div>`;
+  renderSyncBanner();
 }
 
 function challengeCard(ch) {
@@ -1190,13 +1433,28 @@ function challengeCard(ch) {
       break;
     case 'country':
       body = `
-        <ul class="ch-list">
-          ${p.list.slice(0, 50).map(c => `
-            <li>
-              <span class="mark">${c.read ? '✓' : '·'}</span>
-              <span class="title">${esc(c.name)}</span>
-              <span class="sub">${c.read}${c.books.length > c.read ? '+'+(c.books.length-c.read)+' TBR' : ''}</span>
-            </li>`).join('')}
+        <ul class="ch-list ch-country-list">
+          ${p.list.slice(0, 80).map(c => {
+            const isOpen = _expandedCountries.has(ch.id + '|' + c.name);
+            return `
+              <li class="country-row ${isOpen?'open':''}">
+                <div class="country-head" onclick="event.stopPropagation();window._toggleCountry('${attr(ch.id)}','${attr(c.name)}')">
+                  <span class="mark">${c.read ? '✓' : '·'}</span>
+                  <span class="title">${esc(c.name)}</span>
+                  <span class="sub">${c.read}${c.books.length > c.read ? ' · +' + (c.books.length - c.read) + ' TBR' : ''}</span>
+                  <svg class="chev" viewBox="0 0 24 24" width="14" height="14"><path d="M6 9l6 6 6-6"/></svg>
+                </div>
+                ${isOpen ? `
+                  <ul class="country-books">
+                    ${c.books.slice().sort((a, b) => (b.dateRead||'').localeCompare(a.dateRead||'')).map(b => `
+                      <li onclick="event.stopPropagation();location.hash='#/book/${attr(b.id)}'">
+                        <span class="mark">${b.status==='read'?'✓':b.status==='dnf'?'×':'·'}</span>
+                        <span class="title">${esc(b.title)}</span>
+                        <span class="sub">${b.dateRead ? fmtDate(b.dateRead) : b.status.toUpperCase()}</span>
+                      </li>`).join('')}
+                  </ul>` : ''}
+              </li>`;
+          }).join('')}
         </ul>`;
       break;
     case 'author':
@@ -1347,165 +1605,41 @@ window._delChallenge = (id) => {
   location.hash = '#/challenges';
 };
 
-// ---------- settings ----------
-function viewSettings() {
-  setHeader({ title: 'Settings' });
-  const cfg = State.config;
-  const pat = getPat();
-  const masked = pat ? '•'.repeat(Math.min(20, pat.length)) : '';
-  $('#app').innerHTML = `
-    <div id="syncBanner" class="sync-banner"></div>
-    <div class="group">
-      <h3>GitHub Sync</h3>
-      <p>Push your books.json to a repo so it syncs across devices and lives in version control.</p>
-      <div class="row">
-        <div class="field"><label>Owner</label><input id="cfgOwner" value="${attr(cfg.owner||'')}" placeholder="your-username"></div>
-        <div class="field"><label>Repo</label><input id="cfgRepo" value="${attr(cfg.repo||'')}" placeholder="library"></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Branch</label><input id="cfgBranch" value="${attr(cfg.branch||'main')}"></div>
-        <div class="field"><label>Path</label><input id="cfgPath" value="${attr(cfg.path||'books.json')}"></div>
-      </div>
-      <div class="field">
-        <label>Personal access token <span style="text-transform:none;color:var(--text-mute)">(fine-grained, with Contents: read & write on this repo)</span></label>
-        <input id="cfgPat" type="password" placeholder="${pat ? masked : 'ghp_...'}" autocomplete="off">
-        <div class="helper">Stored locally on this device only. Leave blank to keep existing.</div>
-      </div>
-      <div class="action-row">
-        <button onclick="window._saveCfg()">Save settings</button>
-        <button class="save-btn" onclick="window._sync()" id="syncBtn">
-          ${State.dirty ? 'Sync to GitHub (unsaved)' : 'Sync to GitHub'}
-        </button>
-      </div>
-    </div>
-
-    <div class="group">
-      <h3>Import / Export</h3>
-      <p>Download your library as JSON, or restore from a JSON file.</p>
-      <div class="action-row">
-        <button onclick="window._exportJson()">Export books.json</button>
-        <button onclick="document.getElementById('importFile').click()">Import JSON</button>
-        <input type="file" id="importFile" accept=".json,application/json" hidden onchange="window._importJson(event)">
-      </div>
-    </div>
-
-    <div class="group">
-      <h3>Kindle highlights</h3>
-      <p>Upload your <code>My Clippings.txt</code> from a Kindle. Highlights are matched to books by title and added as quotes.</p>
-      <input type="file" id="kindleFile" class="file-input" accept=".txt,text/plain">
-      <div class="helper">To export: plug your Kindle into a computer, open the device drive, copy <code>documents/My Clippings.txt</code>.</div>
-      <div id="kindlePreview" style="margin-top:10px"></div>
-    </div>
-
-    <div class="group">
-      <h3>Reset</h3>
-      <p>Reload books from the repo's books.json, discarding any local-only edits.</p>
-      <div class="action-row">
-        <button class="danger" onclick="window._resetLocal()">Discard local edits</button>
-      </div>
-    </div>
-
-    <div class="group">
-      <h3>Diagnostics</h3>
-      <p style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6;color:var(--text-soft)">
-        Books: <b>${State.books.length}</b><br>
-        Challenges: <b>${(State.challenges||[]).length}</b><br>
-        Local dirty: <b>${State.dirty ? 'yes' : 'no'}</b><br>
-        Sync status: <b>${computeSyncStatus()}</b><br>
-        Last successful sync: <b>${SyncState.lastSuccess ? new Date(SyncState.lastSuccess).toLocaleString() : '—'}</b><br>
-        Last error: <b>${esc(SyncState.lastError || '—')}</b><br>
-        Online: <b>${navigator.onLine ? 'yes' : 'no'}</b><br>
-        PAT configured: <b>${getPat() ? 'yes' : 'no'}</b>
-      </p>
-    </div>
-  `;
-  $('#kindleFile').onchange = window._kindleImport;
-  renderSyncBanner();
-}
-
-window._saveCfg = () => {
-  State.config.owner = $('#cfgOwner').value.trim();
-  State.config.repo = $('#cfgRepo').value.trim();
-  State.config.branch = $('#cfgBranch').value.trim() || 'main';
-  State.config.path = $('#cfgPath').value.trim() || 'books.json';
-  const newPat = $('#cfgPat').value.trim();
-  if (newPat) setPat(newPat);
-  saveConfig();
-  toast('Settings saved');
-};
-
-window._exportJson = () => {
-  const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
-  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = 'books.json'; a.click();
-  URL.revokeObjectURL(url);
-};
-
-window._importJson = (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const r = new FileReader();
-  r.onload = () => {
-    try {
-      const doc = JSON.parse(r.result);
-      const incoming = doc.books || (Array.isArray(doc) ? doc : null);
-      if (!Array.isArray(incoming)) throw new Error('Invalid file');
-      if (!confirm(`Replace ${State.books.length} books with ${incoming.length} from file?`)) return;
-      State.books = incoming;
-      if (Array.isArray(doc.challenges)) State.challenges = doc.challenges;
-      State.dirty = true;
-      persist();
-      toast('Imported');
-      route();
-    } catch (err) {
-      toast('Bad JSON');
+// Google Drive sign-in. On first-ever sign-in with an empty Drive, this
+// automatically migrates any local books (loaded from the repo's books.json
+// as a seed on cold start) up to Drive.
+window._driveSignIn = async () => {
+  try {
+    if (!State.config.driveClientId) {
+      toast('Google Client ID not set — edit app.js', 3500);
+      return;
     }
-  };
-  r.readAsText(file);
-};
-
-window._resetLocal = async () => {
-  if (!confirm('Discard all local edits and reload from repo books.json?')) return;
-  localStorage.removeItem(STORE_KEY);
-  await loadBooks();
-  toast('Reloaded');
-  route();
-};
-
-// GitHub sync core (reusable for manual + auto)
-async function pushToGitHub() {
-  const cfg = State.config;
-  const pat = getPat();
-  if (!cfg.owner || !cfg.repo) throw new Error('Repo not configured');
-  if (!pat) throw new Error('No PAT configured');
-  const api = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodeURIComponent(cfg.path)}`;
-  let sha = null;
-  const head = await fetch(`${api}?ref=${encodeURIComponent(cfg.branch)}`, {
-    headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json' }
-  });
-  if (head.status === 200) {
-    sha = (await head.json()).sha;
-  } else if (head.status !== 404) {
-    throw new Error(`HEAD ${head.status}`);
+    await getDriveToken({ interactive: true });
+    // Migration: if Drive has no books.json yet and we have local data, push it up.
+    const existing = await findDriveFile();
+    if (!existing && (State.books.length > 0 || (State.challenges || []).length > 0)) {
+      const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
+      await pushDriveFile(doc);
+      State.dirty = false;
+      persist();
+      toast(`Signed in · migrated ${State.books.length} books to Drive`, 3000);
+    } else {
+      toast('Signed in to Google Drive');
+    }
+    // Re-load so subsequent state comes from Drive
+    await loadBooks();
+    ensurePersistentStorage();
+    route();
+  } catch (e) {
+    console.error('[drive] sign-in failed', e);
+    toast('Sign-in failed: ' + e.message, 3500);
   }
+};
+
+// Push core — routes to whichever backend is active
+async function pushRemote() {
   const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
-  const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))));
-  const put = await fetch(api, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${pat}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      message: `Update books.json (${State.books.length} books)`,
-      content,
-      branch: cfg.branch,
-      sha: sha || undefined,
-    }),
-  });
-  if (!put.ok) {
-    const t = await put.text();
-    throw new Error(`PUT ${put.status}: ${t.slice(0, 120)}`);
-  }
+  await currentBackend().push(doc);
   State.dirty = false;
   persist();
 }
@@ -1515,7 +1649,7 @@ const SyncState = { status: 'idle', lastError: null, lastSuccess: null };
 // status: 'idle' | 'pending' | 'syncing' | 'error' | 'offline' | 'no-pat'
 
 function computeSyncStatus() {
-  if (!getPat() || !State.config.owner || !State.config.repo) return 'no-pat';
+  if (!currentBackend().isConfigured()) return 'unconfigured';
   if (!navigator.onLine) return 'offline';
   if (SyncState.status === 'syncing') return 'syncing';
   if (State.dirty) return SyncState.lastError ? 'error' : 'pending';
@@ -1527,7 +1661,7 @@ let _syncTimer = null;
 let _syncing = false;
 let _syncAgain = false;
 function scheduleAutoSync(delayMs = 800) {
-  if (computeSyncStatus() === 'no-pat') { renderSyncBanner(); return; }
+  if (computeSyncStatus() === 'unconfigured') { renderSyncBanner(); return; }
   if (!navigator.onLine) { renderSyncBanner(); return; }
   if (_syncTimer) clearTimeout(_syncTimer);
   _syncTimer = setTimeout(autoSync, delayMs);
@@ -1540,11 +1674,11 @@ async function autoSync() {
   SyncState.status = 'syncing';
   renderSyncBanner();
   try {
-    await pushToGitHub();
+    await pushRemote();
     SyncState.lastError = null;
     SyncState.lastSuccess = new Date().toISOString();
     const hash = location.hash || '#/';
-    if (hash === '#/' || hash === '#/settings') route();
+    if (hash === '#/' || hash === '#/challenges') route();
   } catch (e) {
     console.warn('[auto-sync] failed', e);
     SyncState.lastError = e.message;
@@ -1562,101 +1696,34 @@ function renderSyncBanner() {
   const el = document.getElementById('syncBanner');
   if (!el) return;
   const s = computeSyncStatus();
+  if (s === 'unconfigured') {
+    if (!State.config.driveClientId) {
+      el.className = 'sync-banner err';
+      el.innerHTML = 'Google Client ID not set — edit <code>GOOGLE_CLIENT_ID</code> at the top of <code>app.js</code> and reload.';
+      return;
+    }
+    el.className = 'sync-banner err';
+    el.innerHTML = `
+      <div>${State.dirty ? 'You have unsaved edits. ' : ''}Sign in to Google Drive to sync your library across devices.</div>
+      <button onclick="window._driveSignIn()" style="width:auto;padding:8px 14px;margin-top:8px;font-size:13px;background:var(--text);color:var(--bg);border-color:var(--text)">Sign in with Google</button>
+    `;
+    return;
+  }
   const map = {
-    'synced':    { text: 'All changes synced to GitHub', cls: 'ok' },
-    'pending':   { text: 'Unsaved edits — syncing shortly…', cls: 'warn' },
-    'syncing':   { text: 'Syncing to GitHub…', cls: 'warn' },
-    'offline':   { text: State.dirty ? 'Offline — edits will sync when you\'re back online' : 'Offline', cls: 'warn' },
-    'error':     { text: 'Sync failed: ' + (SyncState.lastError || 'unknown error') + ' · your edits are still on this device', cls: 'err' },
-    'no-pat':    { text: State.dirty
-      ? 'Not backed up. Your edits are only on this device — set up GitHub sync in Settings so you don\'t lose them.'
-      : 'Not backed up. Set up GitHub sync in Settings to keep your library safe.', cls: 'err' },
+    'synced':  { text: 'All changes synced to Google Drive', cls: 'ok' },
+    'pending': { text: 'Unsaved edits — syncing shortly…', cls: 'warn' },
+    'syncing': { text: 'Syncing to Google Drive…', cls: 'warn' },
+    'offline': { text: State.dirty ? 'Offline — edits will sync when you\'re back online' : 'Offline', cls: 'warn' },
+    'error':   { text: 'Sync failed: ' + (SyncState.lastError || 'unknown error') + ' · your edits are still on this device', cls: 'err' },
   };
   const it = map[s] || map.synced;
   el.className = 'sync-banner ' + it.cls;
-  el.innerHTML = it.text + (s === 'no-pat' ? ` · <a href="#/settings" style="text-decoration:underline">Open Settings</a>` : '');
+  el.innerHTML = it.text;
 }
 // Retry queued sync when the device comes back online
 window.addEventListener('online', () => { renderSyncBanner(); if (State.dirty) scheduleAutoSync(500); });
 window.addEventListener('offline', () => { renderSyncBanner(); });
 
-// Manual sync button — same core, with UI feedback
-window._sync = async () => {
-  const cfg = State.config;
-  const pat = getPat();
-  if (!cfg.owner || !cfg.repo) { toast('Set owner & repo first'); return; }
-  if (!pat) { toast('Add a personal access token first'); return; }
-  const btn = $('#syncBtn');
-  btn.innerHTML = '<span class="spin"></span> Syncing…';
-  btn.disabled = true;
-  try {
-    await pushToGitHub();
-    toast('Synced to GitHub');
-    route();
-  } catch (e) {
-    console.error(e);
-    toast('Sync failed: ' + e.message, 3000);
-  } finally {
-    btn.disabled = false;
-  }
-};
-
-// Kindle My Clippings.txt parser
-// Format: each clipping is 5 lines, separated by ==========
-//   Title (Author)
-//   - Your Highlight on page X | Location ... | Added on ...
-//   <blank>
-//   Highlighted text
-//   ==========
-window._kindleImport = (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const r = new FileReader();
-  r.onload = () => {
-    const items = parseClippings(r.result);
-    const grouped = {};
-    items.forEach(it => {
-      const key = normTitle(it.title);
-      if (!grouped[key]) grouped[key] = { title: it.title, author: it.author, quotes: [] };
-      if (it.kind === 'highlight' && it.text) grouped[key].quotes.push(it.text);
-    });
-    // match
-    const norm = s => normTitle(s);
-    const matches = Object.values(grouped).map(g => {
-      const match = State.books.find(b => norm(b.title) === norm(g.title));
-      return { ...g, match };
-    });
-    const preview = $('#kindlePreview');
-    preview.innerHTML = `
-      <div class="helper">Parsed ${items.length} clippings · ${matches.length} books · ${matches.filter(m=>m.match).length} matched in your library.</div>
-      <ul style="list-style:none;padding:0;margin:8px 0;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:var(--radius)">
-        ${matches.map((m, i) => `
-          <li style="padding:8px 10px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center">
-            <input type="checkbox" data-i="${i}" ${m.match ? 'checked' : ''} ${m.match ? '' : 'disabled'} style="width:auto">
-            <div style="flex:1;font-size:13px">
-              <div>${esc(m.title)} <span style="color:var(--text-mute)">${esc(m.author||'')}</span></div>
-              <div style="color:var(--text-mute);font-size:11px">${m.quotes.length} quote${m.quotes.length===1?'':'s'} · ${m.match ? 'matched' : 'no match'}</div>
-            </div>
-          </li>`).join('')}
-      </ul>
-      <button id="applyKindle">Add ${matches.filter(m=>m.match).length} matched as quotes</button>
-    `;
-    $('#applyKindle').onclick = () => {
-      let added = 0;
-      $$('#kindlePreview input:checked').forEach(cb => {
-        const m = matches[+cb.dataset.i];
-        if (!m.match) return;
-        const b = getBook(m.match.id);
-        const existing = new Set((b.quotes || []).map(q => q.trim()));
-        m.quotes.forEach(q => { if (!existing.has(q.trim())) { b.quotes = (b.quotes || []).concat([q]); existing.add(q.trim()); added++; } });
-        upsertBook(b);
-      });
-      toast(`Added ${added} quotes`);
-      route();
-    };
-  };
-  r.readAsText(file);
-};
 
 function parseClippings(txt) {
   // Strip BOM
@@ -1687,6 +1754,8 @@ function normTitle(s) {
 // ---------- bootstrap ----------
 (async () => {
   await loadBooks();
+  // If we already have a Drive token cached, keep our storage from being evicted.
+  if (isDriveSignedIn()) ensurePersistentStorage();
   if (!location.hash) location.hash = '#/';
   route();
 })();
