@@ -298,11 +298,11 @@ async function loadBooks() {
   loadPrefs();
 
   // Read working copy from localStorage
-  let local = null;
-  try {
-    const s = localStorage.getItem(STORE_KEY);
-    if (s) local = JSON.parse(s);
-  } catch (e) { console.warn('[load] localStorage read failed:', e); }
+  // let local = null;
+  // try {
+  //   const s = localStorage.getItem(STORE_KEY);
+  //   if (s) local = JSON.parse(s);
+  // } catch (e) { console.warn('[load] localStorage read failed:', e); }
 
   // Try the remote copy — pick up cross-device edits.
   let remote = null;
@@ -319,16 +319,18 @@ async function loadBooks() {
     } catch {}
   }
 
-  const localBooks = (local && local.books) || [];
+  // const localBooks = (local && local.books) || [];
   const remoteBooks = (remote && remote.books) || [];
-  const localChallenges = local && local.challenges;
+  // const localChallenges = local && local.challenges;
   const remoteChallenges = remote && remote.challenges;
 
   // Per-item merge by id: for each book, keep whichever copy has the newer
   // updatedAt. This is safe — an entry that exists locally can NEVER be
   // silently dropped just because a stale remote didn't include it.
-  State.books = mergeById(localBooks, remoteBooks);
-  State.challenges = mergeById(localChallenges || [], remoteChallenges || []);
+  //State.books = mergeById(localBooks, remoteBooks);
+  State.books = remoteBooks;
+  //State.challenges = mergeById(localChallenges || [], remoteChallenges || []);
+  State.challenges = remoteChallenges || []
   if (!localChallenges && !remoteChallenges) State.challenges = undefined;
 
   // Dirty is preserved from local; local is authoritative for pending edits.
