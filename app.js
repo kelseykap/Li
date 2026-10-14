@@ -1207,7 +1207,7 @@ function viewStats() {
       </div>
     </div>
 
-    <div class="section-h">Books per year <span style="text-transform:none;color:var(--text-mute)">· physical</span></div>
+    <div class="section-h">Books per year</div>
     ${bookYears.length ? `<div class="bar-chart">
       ${bookYears.map(y => `
         <div class="bar-row">
@@ -1231,7 +1231,7 @@ function viewStats() {
       <div><div class="k">This year</div><div class="v">${audioThisYear.length}</div></div>
     </div>` : `<div class="empty">No audiobooks logged yet.</div>`}
 
-    <div class="section-h">Reading pace</div>
+    <div class="section-h">Reading pace <span style="text-transform:none;color:var(--text-mute)">· this year</span></div>
     <div class="meta-grid">
       <div><div class="k">Avg days / book</div><div class="v">${avgDaysPerBook ?? '—'}</div></div>
       <div><div class="k">Avg pages / day</div><div class="v">${avgPagesPerDay ?? '—'}</div></div>
@@ -1372,7 +1372,7 @@ function challengeProgress(ch) {
       const list = [...countries.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([name, e]) => ({ name, books: e.books, read: e.read }));
-      return { done, total: list.length, list };
+      return { done, total: 195, list };
     }
     case 'author': {
       const target = (ch.target || '').toLowerCase().trim();
