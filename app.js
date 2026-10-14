@@ -298,11 +298,11 @@ async function loadBooks() {
   loadPrefs();
 
   // Read working copy from localStorage
-  // let local = null;
-  // try {
-  //   const s = localStorage.getItem(STORE_KEY);
-  //   if (s) local = JSON.parse(s);
-  // } catch (e) { console.warn('[load] localStorage read failed:', e); }
+  let local = null;
+  try {
+    const s = localStorage.getItem(STORE_KEY);
+    if (s) local = JSON.parse(s);
+  } catch (e) { console.warn('[load] localStorage read failed:', e); }
 
   // Try the remote copy — pick up cross-device edits.
   let remote = null;
@@ -319,18 +319,16 @@ async function loadBooks() {
     } catch {}
   }
 
-  // const localBooks = (local && local.books) || [];
+  const localBooks = (local && local.books) || [];
   const remoteBooks = (remote && remote.books) || [];
-  // const localChallenges = local && local.challenges;
+  const localChallenges = local && local.challenges;
   const remoteChallenges = remote && remote.challenges;
 
   // Per-item merge by id: for each book, keep whichever copy has the newer
   // updatedAt. This is safe — an entry that exists locally can NEVER be
   // silently dropped just because a stale remote didn't include it.
-  //State.books = mergeById(localBooks, remoteBooks);
-  State.books = remoteBooks;
-  //State.challenges = mergeById(localChallenges || [], remoteChallenges || []);
-  State.challenges = remoteChallenges || []
+  State.books = mergeById(localBooks, remoteBooks);
+  State.challenges = mergeById(localChallenges || [], remoteChallenges || []);
   if (!localChallenges && !remoteChallenges) State.challenges = undefined;
 
   // Dirty is preserved from local; local is authoritative for pending edits.
@@ -1183,12 +1181,13 @@ function viewStats() {
 
   // reading pace — physical, consecutive
   const times = [];
-  for (let i = 1; i < physicalAll.length; i++) {
-    const a = new Date(physicalAll[i - 1].dateRead);
-    const c = new Date(physicalAll[i].dateRead);
+  for (let i = 1; i < physicalThisYear.length; i++) {
+    const a = new Date(physicalThisYear[i - 1].dateRead);
+    const c = new Date(physicalThisYear[i].dateRead);
     const days = Math.max(1, Math.round((c - a) / 86400000));
-    times.push({ book: physicalAll[i], days });
+    times.push({ book: physicalThisYear[i], days });
   }
+
   const withPages = times.filter(t => t.book.pageCount);
   const avgDaysPerBook = times.length ? Math.round(times.reduce((s, t) => s + t.days, 0) / times.length) : null;
   const avgPagesPerDay = withPages.length
