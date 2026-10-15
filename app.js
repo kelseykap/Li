@@ -55,8 +55,6 @@ const State = {
 const DEFAULT_CHALLENGES = [
   { id: 'ch_alphabet', type: 'alphabet', name: 'Read the alphabet', description: 'A book starting with each letter A–Z. Articles ("The", "A") stripped.' },
   { id: 'ch_countries', type: 'country', name: 'One book per country', description: 'Unique countries discovered through reading.' },
-  { id: 'ch_atwood', type: 'author', name: 'Complete Margaret Atwood', target: 'Margaret Atwood', description: 'Every book by Margaret Atwood — read or TBR.' },
-  { id: 'ch_time', type: 'genre', name: 'Genre: Time-travel', target: 'Time-travel', description: 'Books exploring time travel.' },
 ];
 
 // Persist UI preferences across sessions
@@ -172,18 +170,41 @@ function initDriveTokenClient() {
 async function getDriveToken({ interactive = false } = {}) {
   const cached = getDriveTokenCached();
   if (cached) return cached;
+
   const client = initDriveTokenClient();
+
   return new Promise((resolve, reject) => {
-    _tokenWaiters.push({ resolve, reject });
-    try {
-      // prompt: '' → silent if user is signed in to Google in this browser;
-      // prompt: 'consent' → forces the consent screen (first-time sign-in)
-      client.requestAccessToken({ prompt: interactive ? 'consent' : '' });
-    } catch (e) { reject(e); return; }
-    setTimeout(() => {
-      const idx = _tokenWaiters.findIndex(w => w.resolve === resolve);
-      if (idx >= 0) { _tokenWaiters.splice(idx, 1); reject(new Error('Sign-in timed out')); }
+    let settled = false;
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      callback(value);
+    };
+
+    const waiter = {
+      resolve: token => finish(resolve, token),
+      reject: error => finish(reject, error),
+    };
+
+    const timeoutId = setTimeout(() => {
+      const idx = _tokenWaiters.indexOf(waiter);
+      if (idx >= 0) _tokenWaiters.splice(idx, 1);
+      finish(reject, new Error('Sign-in timed out'));
     }, 30000);
+
+    _tokenWaiters.push(waiter);
+
+    try {
+      client.requestAccessToken({
+        prompt: interactive ? 'consent' : '',
+      });
+    } catch (e) {
+      const idx = _tokenWaiters.indexOf(waiter);
+      if (idx >= 0) _tokenWaiters.splice(idx, 1);
+      finish(reject, e);
+    }
   });
 }
 
@@ -194,9 +215,8 @@ async function driveApi(pathAndQuery, opts = {}) {
     ...opts,
     headers: { ...(opts.headers||{}), Authorization: 'Bearer ' + token },
   });
-  if (r.status === 401 || r.status === 403) {
-    // token might have been revoked — force a re-auth on the next call
-    clearDriveToken();
+  if (r.status === 401) {
+  clearDriveToken();
   }
   if (!r.ok) {
     const t = await r.text();
@@ -1609,28 +1629,44 @@ window._delChallenge = (id) => {
 // Google Drive sign-in. On first-ever sign-in with an empty Drive, this
 // automatically migrates any local books (loaded from the repo's books.json
 // as a seed on cold start) up to Drive.
+// Google Drive sign-in / reconnect.
 window._driveSignIn = async () => {
   try {
     if (!State.config.driveClientId) {
       toast('Google Client ID not set — edit app.js', 3500);
       return;
     }
-    await getDriveToken({ interactive: true });
+
+    // Try to obtain a token without forcing the consent screen.
+    await getDriveToken();
+
     // Migration: if Drive has no books.json yet and we have local data, push it up.
     const existing = await findDriveFile();
-    if (!existing && (State.books.length > 0 || (State.challenges || []).length > 0)) {
-      const doc = { version: 2, updatedAt: nowIso(), books: State.books, challenges: State.challenges };
+
+    if (!existing && (
+      State.books.length > 0 ||
+      (State.challenges || []).length > 0
+    )) {
+      const doc = {
+        version: 2,
+        updatedAt: nowIso(),
+        books: State.books,
+        challenges: State.challenges
+      };
+
       await pushDriveFile(doc);
       State.dirty = false;
       persist();
+
       toast(`Signed in · migrated ${State.books.length} books to Drive`, 3000);
     } else {
       toast('Signed in to Google Drive');
     }
-    // Re-load so subsequent state comes from Drive
+
     await loadBooks();
     ensurePersistentStorage();
     route();
+
   } catch (e) {
     console.error('[drive] sign-in failed', e);
     toast('Sign-in failed: ' + e.message, 3500);
@@ -1678,8 +1714,6 @@ async function autoSync() {
     await pushRemote();
     SyncState.lastError = null;
     SyncState.lastSuccess = new Date().toISOString();
-    const hash = location.hash || '#/';
-    if (hash === '#/' || hash === '#/challenges') route();
   } catch (e) {
     console.warn('[auto-sync] failed', e);
     SyncState.lastError = e.message;
@@ -1696,13 +1730,19 @@ async function autoSync() {
 function renderSyncBanner() {
   const el = document.getElementById('syncBanner');
   if (!el) return;
+
   const s = computeSyncStatus();
+
+  // Show the banner when Google Drive needs configuration or sign-in.
   if (s === 'unconfigured') {
+    el.style.display = '';
+
     if (!State.config.driveClientId) {
       el.className = 'sync-banner err';
       el.innerHTML = 'Google Client ID not set — edit <code>GOOGLE_CLIENT_ID</code> at the top of <code>app.js</code> and reload.';
       return;
     }
+
     el.className = 'sync-banner err';
     el.innerHTML = `
       <div>${State.dirty ? 'You have unsaved edits. ' : ''}Sign in to Google Drive to sync your library across devices.</div>
@@ -1710,17 +1750,11 @@ function renderSyncBanner() {
     `;
     return;
   }
-  const map = {
-    'synced':  { text: 'All changes synced to Google Drive', cls: 'ok' },
-    'pending': { text: 'Unsaved edits — syncing shortly…', cls: 'warn' },
-    'syncing': { text: 'Syncing to Google Drive…', cls: 'warn' },
-    'offline': { text: State.dirty ? 'Offline — edits will sync when you\'re back online' : 'Offline', cls: 'warn' },
-    'error':   { text: 'Sync failed: ' + (SyncState.lastError || 'unknown error') + ' · your edits are still on this device', cls: 'err' },
-  };
-  const it = map[s] || map.synced;
-  el.className = 'sync-banner ' + it.cls;
-  el.innerHTML = it.text;
+
+  // Hide routine sync status messages.
+  el.style.display = 'none';
 }
+
 // Retry queued sync when the device comes back online
 window.addEventListener('online', () => { renderSyncBanner(); if (State.dirty) scheduleAutoSync(500); });
 window.addEventListener('offline', () => { renderSyncBanner(); });
